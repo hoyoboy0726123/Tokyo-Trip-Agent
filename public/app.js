@@ -163,6 +163,11 @@ function handle(m) {
     case "ai_retry":
       aiRetry(m);
       break;
+    case "ai_note": {
+      const live = S.live.get(m.id);
+      if (live) live.node.querySelector(".meta").textContent = m.text;
+      break;
+    }
     case "ai_done":
       aiDone(m);
       break;
@@ -300,7 +305,9 @@ function aiRetry(m) {
   const live = S.live.get(m.id);
   if (!live) return;
   live.text = "";
-  live.node.querySelector(".ai-text").innerHTML = `<span class="muted small">主要模型出錯，改用備援模型…</span>`;
+  live.node.querySelector(".ai-text").innerHTML = m.rateLimited
+    ? `<span class="muted small">Gemini 額度冷卻中，改用備援模型回答…</span>`
+    : `<span class="muted small">主要模型出錯，改用備援模型…</span>`;
 }
 
 function aiDone(m) {
@@ -485,6 +492,16 @@ function setState(state) {
     els.todayTitle.textContent = "旅程結束，歡迎回家！";
   }
   if (S.panel && S.panel !== "settings") renderPanel();
+  const usage = document.querySelector("#gemini-usage");
+  if (usage) usage.textContent = geminiUsageText(state.gemini);
+}
+
+function geminiUsageText(g) {
+  if (!g) return "";
+  const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
+  let s = `本分鐘 ${g.rpm}/${g.rpmLimit} 次、${k(g.tpm)}/${k(g.tpmLimit)} tokens｜今日 ${g.rpd}/${g.rpdLimit} 次`;
+  if (g.cooldownSec) s += `｜冷卻中 ${g.cooldownSec} 秒（期間改用備援模型）`;
+  return s;
 }
 
 document.querySelectorAll("[data-panel]").forEach((b) => b.addEventListener("click", () => openPanel(b.dataset.panel)));
@@ -495,6 +512,7 @@ els.panel.addEventListener("click", (e) => e.target === els.panel && els.panel.c
 function openPanel(name) {
   S.panel = name;
   renderPanel();
+  if (name === "settings" && S.ws?.readyState === 1) S.ws.send(JSON.stringify({ type: "get_state" }));
   if (!els.panel.open) els.panel.showModal();
 }
 
@@ -631,6 +649,7 @@ function renderPanel() {
           <div>AI 模型：<b>${s.provider === "workers-ai" ? `Workers AI（${escapeHtml(s.workersModel)}）` : `Gemini（${escapeHtml(s.geminiModel)}）`}</b></div>
           <div>回覆方式：<b>${s.replyMode === "mention" ? "只回覆 @AI 的訊息" : "每則訊息都回覆"}</b></div>
           <div>網路搜尋：${s.hasTavily ? "✅ Tavily" : "⚠️ 未設定 TAVILY_API_KEY"}｜Gemini：${s.hasGemini ? "✅" : "⚠️ 未設定"}</div>
+          <div>Gemini 用量：<span id="gemini-usage">${escapeHtml(geminiUsageText(st.gemini))}</span></div>
         </div>
         ${S.me.admin ? `
         <div class="card"><h3>管理員設定</h3>

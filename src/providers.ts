@@ -2,7 +2,27 @@ import type { Env, GenerateResult, Provider, ToolDecl, Turn } from "./types";
 
 // ---------------- Gemini（Google AI Studio） ----------------
 
-export function geminiProvider(env: Env, model?: string): Provider {
+/** 送出前取得額度許可、被拒絕時回報，由 TripRoom 的 GeminiLimiter 實作 */
+export interface GeminiGate {
+  acquire(estimate: number): Promise<(actualTokens?: number) => void>;
+  failed(status: number, body: string): void;
+}
+
+/** 粗估這次請求的 token 數（中文約 1–2 字一個 token，取保守值；圖片約 1,100） */
+function estimateTokens(system: string, turns: Turn[], tools?: ToolDecl[]): number {
+  let chars = system.length + (tools?.length ? JSON.stringify(tools).length : 0);
+  let images = 0;
+  for (const t of turns) {
+    for (const p of t.parts) {
+      if ("text" in p) chars += p.text.length;
+      else if ("image" in p) images++;
+      else chars += JSON.stringify("call" in p ? p.call.args : p.result.response).length + 40;
+    }
+  }
+  return Math.ceil(chars / 1.8) + images * 1100 + 800;
+}
+
+export function geminiProvider(env: Env, model?: string, gate?: GeminiGate): Provider {
   const m = model || env.GEMINI_MODEL || "gemini-3.5-flash-lite";
   return {
     id: "gemini",
@@ -28,24 +48,23 @@ export function geminiProvider(env: Env, model?: string): Provider {
       };
       if (tools?.length) body.tools = [{ functionDeclarations: tools }];
 
+      // 不自動重試：重試只會更快把 RPM/TPM 用光。失敗就冷卻，由上層改用備援模型
+      const report = gate ? await gate.acquire(estimateTokens(system, turns, tools)) : undefined;
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:streamGenerateContent?alt=sse`;
-      // 503/429 多半是 Google 端暫時塞車，稍等重試通常就好
-      let res: Response | null = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (attempt) await new Promise((r) => setTimeout(r, attempt * 1500));
-        res = await fetch(url, {
-          method: "POST",
-          // 串流卡住時整段放棄，改用備援模型，避免聊天室一直顯示「思考中」
-          signal: AbortSignal.timeout(45_000),
-          headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY.trim() },
-          body: JSON.stringify(body),
-        });
-        if (res.ok || ![429, 500, 503].includes(res.status)) break;
-      }
-      if (!res || !res.ok || !res.body) {
-        throw new Error(`Gemini ${res?.status}: ${((await res?.text()) ?? "").slice(0, 300)}`);
+      const res = await fetch(url, {
+        method: "POST",
+        // 串流卡住時整段放棄，改用備援模型，避免聊天室一直顯示「思考中」
+        signal: AbortSignal.timeout(45_000),
+        headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY.trim() },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok || !res.body) {
+        const errText = await res.text();
+        gate?.failed(res.status, errText);
+        throw new Error(`Gemini ${res.status}: ${errText.slice(0, 300)}`);
       }
 
+      let usedTokens = 0;
       const result: GenerateResult = { text: "", calls: [] };
       const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
       let buffer = "";
@@ -64,7 +83,11 @@ export function geminiProvider(env: Env, model?: string): Provider {
           } catch {
             continue;
           }
-          if (chunk.error) throw new Error(`Gemini：${chunk.error.message}`);
+          if (chunk.error) {
+            gate?.failed(chunk.error.code ?? 0, JSON.stringify(chunk.error));
+            throw new Error(`Gemini：${chunk.error.message}`);
+          }
+          if (chunk.usageMetadata?.totalTokenCount) usedTokens = chunk.usageMetadata.totalTokenCount;
           const parts = chunk.candidates?.[0]?.content?.parts ?? [];
           for (const part of parts) {
             if (part.functionCall) {
@@ -81,6 +104,7 @@ export function geminiProvider(env: Env, model?: string): Provider {
           }
         }
       }
+      report?.(usedTokens);
       return result;
     },
   };
@@ -141,9 +165,9 @@ export function workersAIProvider(env: Env, model?: string): Provider {
   };
 }
 
-/** gemini = 主要模型；gemini-backup = 主要模型塞車時的備援 */
-export function providerFor(env: Env, id: string): Provider {
+/** gemini = 主要模型；gemini-backup = 另一個 Gemini 模型（目前備援順序未使用） */
+export function providerFor(env: Env, id: string, gate?: GeminiGate): Provider {
   if (id === "workers-ai") return workersAIProvider(env);
-  if (id === "gemini-backup") return geminiProvider(env, env.GEMINI_BACKUP_MODEL || "gemini-3.1-flash-lite");
-  return geminiProvider(env);
+  if (id === "gemini-backup") return geminiProvider(env, env.GEMINI_BACKUP_MODEL || "gemini-3.1-flash-lite", gate);
+  return geminiProvider(env, undefined, gate);
 }

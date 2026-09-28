@@ -9,6 +9,9 @@ export interface Env {
   TAVILY_API_KEY?: string;
   GEMINI_MODEL: string;
   GEMINI_BACKUP_MODEL?: string;
+  GEMINI_RPM?: string;
+  GEMINI_TPM?: string;
+  GEMINI_RPD?: string;
   WORKERS_AI_MODEL: string;
   DEFAULT_PROVIDER: string;
 }

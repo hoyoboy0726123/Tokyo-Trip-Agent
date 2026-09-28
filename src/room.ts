@@ -1,12 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
 import { safeEqual } from "./auth";
-import { providerFor } from "./providers";
+import { providerFor, type GeminiGate } from "./providers";
+import { GeminiLimiter, RateLimitedError } from "./ratelimit";
 import { runTool, toolLabel, TOOL_DECLS, type ExpenseInput, type RoomApi } from "./tools";
 import { INITIAL_ITINERARY, TRIP } from "./trip-data";
 import type { Env, Part, Provider, SessionUser, Turn } from "./types";
 
-const HISTORY_WINDOW = 40; // 每次帶給模型的最近訊息數
-const MAX_STEPS = 8; // 單次回答最多工具回合
+const HISTORY_WINDOW = 24; // 每次帶給模型的最近訊息數（更早的靠自動回想找回，省 TPM）
+const HISTORY_CHARS = 600; // 每則歷史訊息最多帶多少字
+const MAX_STEPS = 6; // 單次回答最多工具回合
+const FOREGROUND_MAX_WAIT = 10_000; // 回答問題時，Gemini 額度滿最多等幾毫秒，超過就改用備援
 const MEMORY_EVERY = 4; // 每 4 則新的成員訊息自動整理一次長期記憶
 const RECALL_LIMIT = 8; // 從較舊的聊天中自動找回的相關訊息數
 const AI_NAME = "旅伴 AI";
@@ -50,10 +53,18 @@ function toBase64(buf: ArrayBuffer): string {
 export class TripRoom extends DurableObject<Env> implements RoomApi {
   private sql: SqlStorage;
   private queue: Promise<unknown> = Promise.resolve();
+  private limiter: GeminiLimiter;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.limiter = new GeminiLimiter(
+      { rpm: Number(env.GEMINI_RPM) || 15, tpm: Number(env.GEMINI_TPM) || 250_000, rpd: Number(env.GEMINI_RPD) || 500 },
+      {
+        load: () => JSON.parse(this.setting("gemini_day", '{"day":"","count":0}')),
+        save: (v) => this.setSetting("gemini_day", JSON.stringify(v)),
+      },
+    );
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, ts INTEGER, author TEXT, role TEXT, text TEXT, photo_id TEXT, lat REAL, lon REAL, meta TEXT);
       CREATE INDEX IF NOT EXISTS messages_ts ON messages(ts);
@@ -508,6 +519,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       expenses: this.expenseSummary(),
       members: this.members(),
       summary: this.setting("summary"),
+      gemini: this.limiter.usage(),
       locations: this.memberLocation(),
       trip: { title: TRIP.title, startDate: TRIP.startDate, endDate: TRIP.endDate, accommodation: TRIP.accommodation.name },
     };
@@ -628,9 +640,9 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
     };
     for (const m of history) {
       if (m.id === trigger.id) continue;
-      if (m.role === "assistant") push("model", m.text || "（略）");
+      if (m.role === "assistant") push("model", m.text.slice(0, HISTORY_CHARS) || "（略）");
       else if (m.role === "user") {
-        let t = `［${m.author}］${m.text}`;
+        let t = `［${m.author}］${m.text.slice(0, HISTORY_CHARS)}`;
         if (m.photo_id) t += "（附了一張照片）";
         if (m.lat != null) t += `（分享位置 ${m.lat?.toFixed(5)},${m.lon?.toFixed(5)}）`;
         push("user", t);
@@ -663,11 +675,15 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
     const system = this.systemPrompt(trigger, history[0]?.ts ?? trigger.ts);
     const toolsUsed: string[] = [];
     let lastError = "";
+    // 跨模型共用：Gemini 中途被限流時，備援模型接著已完成的工具結果繼續，不會重複記帳或重複查詢
+    let turns = this.buildTurns(history, trigger, image);
+    const gate = this.geminiGate(1, FOREGROUND_MAX_WAIT, (ms) =>
+      this.broadcast({ type: "ai_note", id, text: `Gemini 額度冷卻中，等待 ${Math.ceil(ms / 1000)} 秒…` }),
+    );
 
     for (const pid of order) {
-      const provider: Provider = providerFor(this.env, pid);
+      const provider: Provider = providerFor(this.env, pid, gate);
       this.broadcast({ type: "ai_start", id, provider: provider.id, model: provider.model });
-      let turns = this.buildTurns(history, trigger, image);
       let finalText = "";
       try {
         for (let step = 0; step < MAX_STEPS; step++) {
@@ -704,8 +720,9 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
         return;
       } catch (e: any) {
         lastError = String(e?.message ?? e);
-        console.error(`provider ${pid} failed`, lastError);
-        this.broadcast({ type: "ai_retry", id, error: lastError });
+        const rateLimited = e instanceof RateLimitedError || /Gemini (429|503)/.test(lastError);
+        if (!rateLimited) console.error(`provider ${pid} failed`, lastError);
+        this.broadcast({ type: "ai_retry", id, error: lastError, rateLimited });
       }
     }
 
@@ -714,6 +731,14 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       meta: JSON.stringify({ error: true }),
     });
     this.broadcast({ type: "ai_done", id, message: this.publicMessage(row) });
+  }
+
+  /** share：可用的 Gemini 額度比例；maxWait：額度滿時最多等幾毫秒，超過就改用備援 */
+  private geminiGate(share: number, maxWait: number, onWait?: (ms: number) => void): GeminiGate {
+    return {
+      acquire: (estimate) => this.limiter.acquire(estimate, share, maxWait, onWait),
+      failed: (status, body) => this.limiter.penalize(status, body),
+    };
   }
 
   private consolidating = false;
@@ -754,10 +779,12 @@ ${transcript}
 輸出 JSON：{"summary": "...", "memories": [{"content": "...", "category": "偏好|決定|預訂|資訊|待辦"}], "remove_ids": [數字]}`;
 
     const order = this.settings().hasGemini ? ["gemini", "workers-ai"] : ["workers-ai"];
+    // 背景整理只用 Gemini 一半的額度、不等待；額度緊就交給 Gemma，把 Gemini 留給回答問題
+    const gate = this.geminiGate(0.5, 0);
     try {
       for (const pid of order) {
         try {
-          const res = await providerFor(this.env, pid).generate({
+          const res = await providerFor(this.env, pid, gate).generate({
             system: "你是負責整理旅遊群組長期記憶的助理，只輸出 JSON。",
             turns: [{ role: "user", parts: [{ text: prompt }] }],
             json: true,
@@ -774,7 +801,7 @@ ${transcript}
           this.broadcastState();
           return;
         } catch (e) {
-          console.error(`memory consolidation via ${pid} failed`, e);
+          if (!(e instanceof RateLimitedError)) console.error(`memory consolidation via ${pid} failed`, e);
         }
       }
     } finally {
