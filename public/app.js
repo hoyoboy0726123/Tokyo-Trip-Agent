@@ -597,7 +597,8 @@ function renderPanel() {
     case "memories": {
       els.panelTitle.textContent = "🧠 長期記憶";
       b.innerHTML = `
-        <p class="small muted">AI 會記得這些事，並每隔一段對話自動整理重點。行程變更也會永久保存。</p>
+        <p class="small muted">不用手動輸入：大家聊天時，AI 每隔幾則訊息就會自動記下偏好、決定、預訂與待辦，過時的會自動刪掉，越用越懂你們。這裡也可以手動補充或刪除。</p>
+        ${st.summary ? `<div class="card"><h3>📖 AI 對這趟旅程的理解</h3><div class="small" style="white-space:pre-wrap">${escapeHtml(st.summary)}</div></div>` : ""}
         <div class="card"><form class="form" id="mem-form">
           <textarea name="content" rows="2" placeholder="例如：妹妹對蝦子過敏；門鎖密碼 1234" required></textarea>
           <div class="row"><select name="category">${["偏好", "決定", "預訂", "資訊", "待辦"].map((c) => `<option>${c}</option>`).join("")}</select>
@@ -645,8 +646,7 @@ function renderPanel() {
           </div>
           <div class="small muted" style="margin-top:10px">旅伴名單（記帳預設平分對象，用逗號分隔）</div>
           <form class="row" id="travelers-form"><input name="t" value="${escapeHtml(s.travelers || "")}" placeholder="爸爸, 媽媽, 哥哥, 妹妹" style="flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--card)" /><button class="btn primary-sm">儲存</button></form>
-          <button class="btn danger" id="clear-chat" style="margin-top:14px">清除所有聊天紀錄</button>
-          <p class="small muted">清除聊天不會刪除行程、記憶與帳目。</p>
+          <p class="small muted" style="margin-top:10px">所有聊天紀錄都會永久保存，AI 會自動回想以前聊過的內容。</p>
         </div>` : ""}`;
       b.querySelector("#logout").addEventListener("click", async () => {
         await fetch("/api/logout", { method: "POST" });
@@ -662,7 +662,6 @@ function renderPanel() {
         e.preventDefault();
         action({ action: "settings", travelers: new FormData(e.target).get("t") });
       });
-      b.querySelector("#clear-chat")?.addEventListener("click", () => confirm("確定清除所有人的聊天紀錄？") && action({ action: "clear_chat" }));
       break;
     }
   }

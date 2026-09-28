@@ -7,7 +7,8 @@ import type { Env, Part, Provider, SessionUser, Turn } from "./types";
 
 const HISTORY_WINDOW = 40; // 每次帶給模型的最近訊息數
 const MAX_STEPS = 8; // 單次回答最多工具回合
-const MEMORY_EVERY = 10; // 每 10 則新訊息自動整理一次長期記憶
+const MEMORY_EVERY = 4; // 每 4 則新的成員訊息自動整理一次長期記憶
+const RECALL_LIMIT = 8; // 從較舊的聊天中自動找回的相關訊息數
 const AI_NAME = "旅伴 AI";
 
 type MessageRow = {
@@ -238,6 +239,9 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
           const job = this.queue.then(() => this.runAgent(row, user));
           this.queue = job.catch(() => {});
           await job;
+        } else {
+          // 只回 @AI 模式下，一般聊天也要被記住
+          this.ctx.waitUntil(this.maybeConsolidateMemory());
         }
         return;
       }
@@ -310,13 +314,6 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
           this.broadcastState();
         }
         this.broadcast({ type: "settings", settings: this.settings() });
-        break;
-      case "clear_chat":
-        if (!user.admin) return reply(false, "只有管理員可以清除聊天");
-        this.sql.exec("DELETE FROM messages");
-        this.sql.exec("DELETE FROM photos");
-        this.setSetting("summary", "");
-        this.broadcast({ type: "cleared" });
         break;
       default:
         return reply(false, "未知的操作");
@@ -510,6 +507,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       memories: this.memories(),
       expenses: this.expenseSummary(),
       members: this.members(),
+      summary: this.setting("summary"),
       locations: this.memberLocation(),
       trip: { title: TRIP.title, startDate: TRIP.startDate, endDate: TRIP.endDate, accommodation: TRIP.accommodation.name },
     };
@@ -521,7 +519,43 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
 
   // ================= Agent =================
 
-  private systemPrompt(): string {
+  /**
+   * 自動回想：從「最近訊息視窗之外」的舊聊天裡，找出跟這次問題字詞重疊最多的訊息。
+   * 用中文雙字詞比對，不需要向量資料庫；旅程期間訊息量不大，全掃也很快。
+   */
+  private recallOlder(trigger: MessageRow, windowStartTs: number): string {
+    const grams = (s: string) => {
+      const clean = s.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+      const set = new Set<string>();
+      for (let i = 0; i < clean.length - 1; i++) set.add(clean.slice(i, i + 2));
+      return set;
+    };
+    const q = grams(trigger.text);
+    if (q.size < 2) return "";
+    const older = this.sql
+      .exec<MessageRow>("SELECT * FROM messages WHERE ts < ? AND text != '' ORDER BY ts DESC LIMIT 3000", windowStartTs)
+      .toArray();
+    const scored = older
+      .map((m) => {
+        const g = grams(m.text);
+        let hit = 0;
+        for (const x of q) if (g.has(x)) hit++;
+        return { m, score: hit / Math.sqrt(q.size) };
+      })
+      .filter((x) => x.score >= 0.6)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, RECALL_LIMIT)
+      .sort((a, b) => a.m.ts - b.m.ts);
+    return scored
+      .map(({ m }) => {
+        const t = new Date(m.ts + 9 * 3600_000).toISOString().slice(5, 16).replace("T", " ");
+        return `- ${t} ${m.role === "assistant" ? AI_NAME : m.author}：${m.text.slice(0, 300).replace(/\n+/g, " ")}`;
+      })
+      .join("\n");
+  }
+
+  private systemPrompt(trigger?: MessageRow, windowStartTs?: number): string {
+    const recall = trigger && windowStartTs ? this.recallOlder(trigger, windowStartTs) : "";
     const now = jstNow();
     const start = new Date(TRIP.startDate + "T00:00:00Z").getTime();
     const dayNo = Math.floor((new Date(now.date + "T00:00:00Z").getTime() - start) / 86400_000) + 1;
@@ -570,7 +604,7 @@ ${itin}
 
 # 長期記憶（成員偏好、決定、預訂…，#編號可用 forget 刪除）
 ${mems}
-${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${locs ? `\n# 成員最近位置\n${locs}\n` : ""}
+${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以前聊過、和這次問題相關的內容（依時間排序）\n${recall}\n` : ""}${locs ? `\n# 成員最近位置\n${locs}\n` : ""}
 # 回答規則
 - 一律使用繁體中文與台灣用語，語氣親切，適合手機閱讀：精簡、條列、重點加粗，不要長篇大論。
 - 訊息開頭的［名字］代表是誰說的，回答時可以稱呼對方；但你的回答本身不要用［名字］開頭。
@@ -626,7 +660,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${locs ? `\n# 成員�
       if (p) image = { image: { mime: p.mime as string, data: toBase64(p.data as ArrayBuffer) } };
     }
     const history = this.recentMessages(HISTORY_WINDOW);
-    const system = this.systemPrompt();
+    const system = this.systemPrompt(trigger, history[0]?.ts ?? trigger.ts);
     const toolsUsed: string[] = [];
     let lastError = "";
 
@@ -682,22 +716,31 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${locs ? `\n# 成員�
     this.broadcast({ type: "ai_done", id, message: this.publicMessage(row) });
   }
 
-  /** 長期記憶：定期把聊天內容濃縮成摘要，並萃取值得記住的事實 */
+  private consolidating = false;
+
+  /**
+   * 長期記憶（越用越懂你）：每累積幾則新訊息就自動
+   * 1) 更新整段旅程的對話摘要 2) 萃取新的偏好／決定／預訂／待辦 3) 刪掉過時或被推翻的記憶。
+   * 只有成功才推進游標，失敗的那批下次會再整理，不會漏掉。
+   */
   private async maybeConsolidateMemory() {
+    if (this.consolidating) return;
     const cursor = Number(this.setting("memory_cursor", "0"));
     const fresh = this.sql.exec<MessageRow>("SELECT * FROM messages WHERE ts > ? ORDER BY ts", cursor).toArray();
     if (fresh.filter((m) => m.role === "user").length < MEMORY_EVERY) return;
-    this.setSetting("memory_cursor", String(fresh[fresh.length - 1].ts));
+    this.consolidating = true;
 
     const transcript = fresh
-      .slice(-60)
+      .slice(-80)
       .map((m) => `${m.role === "assistant" ? AI_NAME : m.author}：${m.text.slice(0, 500)}`)
       .join("\n");
-    const existing = this.memories().map((m) => `- ${m.content}`).join("\n") || "（無）";
-    const prompt = `以下是家庭旅遊群組最近的對話，請完成兩件事：
-1. summary：把「舊摘要」與這段對話合併成新的對話摘要（300 字內，保留決定、偏好、待辦、重要資訊）。
-2. memories：從這段對話萃取「之後還會用到」且「不在現有記憶裡」的事實（偏好、決定、預訂、資訊、待辦），每條一句話、寫清楚是誰；沒有就回空陣列。
-   不要收錄住宿地址、航班、行程表這些系統已經知道的基本資料（除非有變更），也不要收錄閒聊或 AI 自己的建議。
+    const existing = this.memories().map((m) => `#${m.id}［${m.category}］${m.content}`).join("\n") || "（無）";
+    const prompt = `以下是家庭旅遊群組最新的對話，請整理群組的長期記憶：
+1. summary：把「舊摘要」與新對話合併成新的「整趟旅程對話摘要」（400 字內；保留每個人的偏好、做過的決定、討論過的店家與地點、待辦、重要資訊）。
+2. memories：萃取新對話中「之後還會用到」且「不在現有記憶裡」的事實，每條一句話、寫清楚是誰。
+   例如：誰喜歡／不吃什麼、想買什麼、想去哪、決定了什麼、訂了什麼、待辦事項、聊到的店名與地址。
+   不要收錄住宿地址、航班這些系統已知的資料，也不要收錄閒聊或 AI 自己的建議。沒有就回空陣列。
+3. remove_ids：現有記憶中已經過時、被新對話推翻、或重複的記憶 id（例如「想吃燒肉」後來改成「想吃壽司」，就刪掉舊的）。沒有就回空陣列。
 
 舊摘要：
 ${this.setting("summary") || "（無）"}
@@ -705,21 +748,37 @@ ${this.setting("summary") || "（無）"}
 現有記憶：
 ${existing}
 
-對話：
+新對話：
 ${transcript}
 
-輸出 JSON：{"summary": "...", "memories": [{"content": "...", "category": "偏好|決定|預訂|資訊|待辦"}]}`;
+輸出 JSON：{"summary": "...", "memories": [{"content": "...", "category": "偏好|決定|預訂|資訊|待辦"}], "remove_ids": [數字]}`;
 
-    const pid = this.settings().hasGemini ? "gemini" : "workers-ai";
+    const order = this.settings().hasGemini ? ["gemini", "workers-ai"] : ["workers-ai"];
     try {
-      const res = await providerFor(this.env, pid).generate({ system: "你是負責整理旅遊群組記憶的助理，只輸出 JSON。", turns: [{ role: "user", parts: [{ text: prompt }] }], json: true });
-      const json = JSON.parse(res.text.replace(/^```(?:json)?|```$/g, "").trim());
-      if (typeof json.summary === "string" && json.summary.trim()) this.setSetting("summary", json.summary.trim().slice(0, 1500));
-      for (const m of (json.memories ?? []).slice(0, 20)) {
-        if (m?.content) this.addMemory(String(m.content), String(m.category || "資訊"), "AI 自動整理");
+      for (const pid of order) {
+        try {
+          const res = await providerFor(this.env, pid).generate({
+            system: "你是負責整理旅遊群組長期記憶的助理，只輸出 JSON。",
+            turns: [{ role: "user", parts: [{ text: prompt }] }],
+            json: true,
+          });
+          const json = JSON.parse(res.text.replace(/^\s*```(?:json)?|```\s*$/g, "").trim());
+          if (typeof json.summary === "string" && json.summary.trim()) this.setSetting("summary", json.summary.trim().slice(0, 2000));
+          for (const id of (json.remove_ids ?? []).slice(0, 20)) {
+            if (Number.isInteger(Number(id))) this.sql.exec("DELETE FROM memories WHERE id = ?", Number(id));
+          }
+          for (const m of (json.memories ?? []).slice(0, 20)) {
+            if (m?.content) this.addMemory(String(m.content), String(m.category || "資訊"), "AI 自動整理");
+          }
+          this.setSetting("memory_cursor", String(fresh[fresh.length - 1].ts));
+          this.broadcastState();
+          return;
+        } catch (e) {
+          console.error(`memory consolidation via ${pid} failed`, e);
+        }
       }
-    } catch (e) {
-      console.error("memory consolidation failed", e);
+    } finally {
+      this.consolidating = false;
     }
   }
 }
