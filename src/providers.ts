@@ -158,7 +158,7 @@ export function workersAIProvider(env: Env, model?: string): Provider {
           console.error("workers-ai stream failed, retry without stream", e);
         }
       }
-      const out: any = await env.AI.run(m as any, input as any);
+      const out: any = await runAi(env, m, input);
 
       const text: string = out?.response ?? out?.choices?.[0]?.message?.content ?? "";
       const rawCalls: any[] = out?.tool_calls ?? out?.choices?.[0]?.message?.tool_calls ?? [];
@@ -175,6 +175,32 @@ export function workersAIProvider(env: Env, model?: string): Provider {
 }
 
 const CHANNEL_TAG = /<\|?\/?channel\|?>/g;
+
+/**
+ * Workers AI 偶爾暫時塞車（4002 could not route、3040 capacity），等一下再試一次通常就好。
+ * 塞車時也可能一直不回應，所以每次最多等 timeoutMs，逾時就交給備援模型（不會一直顯示「思考中」）
+ */
+export async function runAi(env: Env, model: string, input: Record<string, unknown>, timeoutMs = 60_000): Promise<any> {
+  for (let i = 0; ; i++) {
+    let timer: any;
+    try {
+      return await Promise.race([
+        env.AI.run(model as any, input as any),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Workers AI ${timeoutMs / 1000} 秒沒有回應`)), timeoutMs);
+        }),
+      ]);
+    } catch (e) {
+      if (i === 0 && /4002|3040|could not route|capacity/i.test(String((e as any)?.message ?? e))) {
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
 
 /** 工具參數 JSON：串流偶爾重送變成 {…}{…}，取第一個完整的物件 */
 export function parseArgs(raw: string): Record<string, unknown> {
@@ -209,7 +235,7 @@ function cleanModelText(s: string): string {
 
 /** Workers AI 串流（SSE）：同時支援 OpenAI 格式（choices[].delta）與舊格式（response） */
 async function streamWorkersAI(env: Env, model: string, input: Record<string, unknown>, onDelta: (t: string) => void): Promise<GenerateResult> {
-  const stream = (await env.AI.run(model as any, { ...input, stream: true } as any)) as unknown as ReadableStream<Uint8Array>;
+  const stream = (await runAi(env, model, { ...input, stream: true }, 30_000)) as ReadableStream<Uint8Array>;
   if (!stream || typeof (stream as any).getReader !== "function") throw new Error("沒有收到串流");
   const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
   let buffer = "";

@@ -1,3 +1,4 @@
+import { runAi } from "./providers";
 import type { Env } from "./types";
 
 export type Lang = "zh" | "ja";
@@ -22,7 +23,8 @@ export async function translate(env: Env, text: string, from: Lang): Promise<Tra
   const input = text.trim().slice(0, 1000);
   if (!input) throw new Error("沒有要翻譯的內容");
   try {
-    const out: any = await env.AI.run(env.WORKERS_AI_MODEL as any, {
+    // 翻譯通常 1–2 秒；塞車時最多等 30 秒就改用 m2m100
+    const out: any = await runAi(env, env.WORKERS_AI_MODEL, {
       messages: [
         { role: "system", content: PROMPTS[from] },
         { role: "user", content: input },
@@ -31,7 +33,7 @@ export async function translate(env: Env, text: string, from: Lang): Promise<Tra
       temperature: 0.2,
       // 關掉 Gemma 的思考模式，不然要 20 秒以上
       chat_template_kwargs: { enable_thinking: false },
-    } as any);
+    }, 30_000);
     const raw = String(out?.choices?.[0]?.message?.content ?? out?.response ?? "");
     const json = JSON.parse(raw.replace(/^\s*```(?:json)?|```\s*$/g, "").trim());
     if (typeof json.translation === "string" && json.translation.trim()) {
@@ -44,11 +46,11 @@ export async function translate(env: Env, text: string, from: Lang): Promise<Tra
   } catch (e) {
     console.error("gemma translate failed", e);
   }
-  const out: any = await env.AI.run("@cf/meta/m2m100-1.2b" as any, {
+  const out: any = await runAi(env, "@cf/meta/m2m100-1.2b", {
     text: input,
     source_lang: from === "zh" ? "chinese" : "japanese",
     target_lang: from === "zh" ? "japanese" : "chinese",
-  } as any);
+  }, 30_000);
   if (!out?.translated_text) throw new Error("翻譯服務暫時無法使用");
   return { translation: String(out.translated_text).trim(), engine: "m2m100" };
 }

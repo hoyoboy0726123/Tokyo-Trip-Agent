@@ -1150,7 +1150,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 迪士尼當天問排隊，用 disney_wait_times。
 - 問電車有沒有延誤、停駛 → train_status；問計程車多少錢、要多久 → taxi_fare；問地震、颱風、天氣會不會影響行程 → japan_alerts。
 - 收到收據照片（或說「記帳這張收據」）：讀出店名、含稅總金額與主要品項，用 add_expense 記帳（description 寫「店名：品項」），付款人預設是發問者；若是免稅店或金額可能達免稅門檻，順便提醒。
-- 只有成員明確說「加入／加到清單」時才用 add_checklist_items。只是說想買、要帶、問推薦，都不可以自動加入清單；可以在回答最後問一句要不要加進清單。買到了、帶了、辦好了 → update_checklist_item；問清單 → get_checklist。
+- 只有成員明確說「加入／加到清單」時才用 add_checklist_items。只是說想買、要帶、問推薦，都不可以自動加入清單；只有成員提到想買或要帶東西時，才在回答最後問一句要不要加進清單，其他話題（例如記帳、問路）不要問。買到了、帶了、辦好了 → update_checklist_item；問清單 → get_checklist。
 - 要求「幾點提醒」→ create_reminder（時間用東京時間 YYYY-MM-DD HH:mm）。
 - 傳照片說要「存起來／存成票券」→ save_document；問「給我看○○的票／訂位」→ find_documents。
 - 有人傳「🆘」走散求助：先安撫，用 get_member_locations 看大家在哪，建議就近約在明顯地標或車站剪票口集合，提醒可找工作人員幫忙、緊急打 110。
