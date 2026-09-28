@@ -1,6 +1,8 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "tokyo-trip-agent",
+  // Tokyo-Trip 帳號：Workers AI 免費額度以帳號計算，獨立帳號才不會和其他專案搶額度
+  "account_id": "f3cd01403bd458fcb33f39284d79d5f1",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   "assets": {
