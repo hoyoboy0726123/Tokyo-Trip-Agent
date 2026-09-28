@@ -618,7 +618,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${locs ? `\n# 成員�
     const id = newId();
     const settings = this.settings();
     const primary = settings.provider === "workers-ai" || !settings.hasGemini ? "workers-ai" : "gemini";
-    const order = primary === "gemini" ? ["gemini", "gemini-backup", "workers-ai"] : settings.hasGemini ? ["workers-ai", "gemini", "gemini-backup"] : ["workers-ai"];
+    const order = primary === "gemini" ? ["gemini", "workers-ai"] : settings.hasGemini ? ["workers-ai", "gemini"] : ["workers-ai"];
 
     let image: Part | null = null;
     if (trigger.photo_id) {
