@@ -204,22 +204,54 @@ function recentLocation(room: RoomApi, author: string) {
   return fresh(other) ? other : null;
 }
 
-/** quick：附加資訊用（例如最近車站），只試主站、最多 12 秒，查不到就算了 */
+/**
+ * Overpass 同時問兩台，用先回來的。實測從 Cloudflare 連：法國鏡像站 2–5 秒，
+ * 主站常 504（太忙），逐台輪流等會等太久。quick = 附加資訊用（例如最近車站），等比較短
+ */
 async function overpass(query: string, quick = false): Promise<any> {
   const body = "data=" + encodeURIComponent(query);
-  let lastError: unknown;
-  // 主站從 Cloudflare 連線約需 10 秒；備援站常逾時，只給較短的時間
-  const servers: (readonly [string, number])[] = quick
-    ? [["https://overpass-api.de/api/interpreter", 12_000]]
-    : [["https://overpass-api.de/api/interpreter", 25_000], ["https://overpass.kumi.systems/api/interpreter", 10_000]];
-  for (const [url, timeout] of servers) {
-    try {
-      return await getJSON(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body }, timeout);
-    } catch (e) {
-      lastError = e;
-    }
+  const timeout = quick ? 10_000 : 15_000;
+  const servers = ["https://overpass.openstreetmap.fr/api/interpreter", "https://overpass-api.de/api/interpreter"];
+  try {
+    return await Promise.any(
+      servers.map(async (url) => {
+        const d = await getJSON(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body }, timeout);
+        if (!Array.isArray(d?.elements)) throw new Error("回應格式不對");
+        return d;
+      }),
+    );
+  } catch {
+    throw new Error("地圖資料服務忙碌中");
   }
-  throw lastError;
+}
+
+// Overpass 都失敗時改用 Photon（另一個 OpenStreetMap 搜尋服務）找附近地點
+const PHOTON: Record<string, { q: string; tags: string[] }> = {
+  food: { q: "restaurant", tags: ["amenity:restaurant", "amenity:fast_food"] },
+  cafe: { q: "cafe", tags: ["amenity:cafe"] },
+  convenience: { q: "convenience", tags: ["shop:convenience"] },
+  drugstore: { q: "pharmacy", tags: ["shop:chemist", "amenity:pharmacy"] },
+  supermarket: { q: "supermarket", tags: ["shop:supermarket"] },
+  toilet: { q: "toilets", tags: ["amenity:toilets"] },
+  atm: { q: "atm", tags: ["amenity:atm"] },
+  locker: { q: "locker", tags: ["amenity:locker"] },
+  station: { q: "station", tags: ["railway:station"] },
+  shopping: { q: "shop", tags: ["shop:department_store", "shop:mall", "shop:variety_store"] },
+  park: { q: "park", tags: ["leisure:park", "leisure:playground"] },
+};
+
+async function photonNearby(category: string, lat: number, lon: number, radius: number, keyword: string): Promise<any[]> {
+  const p = PHOTON[category] ?? PHOTON.food;
+  const u = new URL("https://photon.komoot.io/api/");
+  u.searchParams.set("q", keyword || p.q);
+  u.searchParams.set("lat", String(lat));
+  u.searchParams.set("lon", String(lon));
+  u.searchParams.set("limit", "40");
+  for (const t of p.tags) u.searchParams.append("osm_tag", t);
+  const d = await getJSON(u.toString(), undefined, 10_000);
+  return (d.features ?? [])
+    .map((f: any) => ({ lat: f.geometry?.coordinates?.[1], lon: f.geometry?.coordinates?.[0], tags: { name: f.properties?.name } }))
+    .filter((e: any) => Number.isFinite(e.lat) && distanceM(lat, lon, e.lat, e.lon) <= Math.max(radius * 2, 1000));
 }
 
 // 料理關鍵字 → OpenStreetMap 的 cuisine 標籤（店名沒寫「ラーメン」的拉麵店也找得到）
@@ -241,17 +273,17 @@ const CUISINE: [RegExp, RegExp][] = [
 // ---------------- 附近地點（OpenStreetMap Overpass） ----------------
 
 const NEARBY: Record<string, string> = {
-  food: `nwr(around:{r},{lat},{lon})["amenity"~"^(restaurant|fast_food|food_court)$"];`,
-  cafe: `nwr(around:{r},{lat},{lon})["amenity"="cafe"];`,
-  convenience: `nwr(around:{r},{lat},{lon})["shop"="convenience"];`,
-  drugstore: `nwr(around:{r},{lat},{lon})["shop"~"^(chemist|pharmacy)$"];nwr(around:{r},{lat},{lon})["amenity"="pharmacy"];`,
-  supermarket: `nwr(around:{r},{lat},{lon})["shop"="supermarket"];`,
-  toilet: `nwr(around:{r},{lat},{lon})["amenity"="toilets"];`,
-  atm: `nwr(around:{r},{lat},{lon})["amenity"="atm"];`,
-  locker: `nwr(around:{r},{lat},{lon})["amenity"="locker"];`,
-  station: `nwr(around:{r},{lat},{lon})["railway"="station"];`,
-  shopping: `nwr(around:{r},{lat},{lon})["shop"~"^(department_store|mall|variety_store|toys|electronics)$"];`,
-  park: `nwr(around:{r},{lat},{lon})["leisure"~"^(park|playground)$"];`,
+  food: `nw(around:{r},{lat},{lon})["amenity"~"^(restaurant|fast_food|food_court)$"];`,
+  cafe: `nw(around:{r},{lat},{lon})["amenity"="cafe"];`,
+  convenience: `nw(around:{r},{lat},{lon})["shop"="convenience"];`,
+  drugstore: `nw(around:{r},{lat},{lon})["shop"~"^(chemist|pharmacy)$"];nw(around:{r},{lat},{lon})["amenity"="pharmacy"];`,
+  supermarket: `nw(around:{r},{lat},{lon})["shop"="supermarket"];`,
+  toilet: `nw(around:{r},{lat},{lon})["amenity"="toilets"];`,
+  atm: `nw(around:{r},{lat},{lon})["amenity"="atm"];`,
+  locker: `nw(around:{r},{lat},{lon})["amenity"="locker"];`,
+  station: `nw(around:{r},{lat},{lon})["railway"="station"];`,
+  shopping: `nw(around:{r},{lat},{lon})["shop"~"^(department_store|mall|variety_store|toys|electronics)$"];`,
+  park: `nw(around:{r},{lat},{lon})["leisure"~"^(park|playground)$"];`,
 };
 
 // ---------------- 工具清單 ----------------
@@ -523,8 +555,16 @@ export const TOOLS: Tool[] = [
       }
       const r = Math.min(Math.max(Number(args.radius_m) || 600, 100), 2000);
       const q = (NEARBY[args.category] ?? NEARBY.food).replaceAll("{r}", String(r)).replaceAll("{lat}", String(center.lat)).replaceAll("{lon}", String(center.lon));
-      const d = await overpass(`[out:json][timeout:20];(${q});out center 150;`);
-      const all = (d.elements ?? [])
+      const kwRaw = String(args.keyword ?? "").trim();
+      let elements: any[];
+      let source = "© OpenStreetMap contributors";
+      try {
+        elements = (await overpass(`[out:json][timeout:15];(${q});out center 150;`)).elements ?? [];
+      } catch {
+        elements = await photonNearby(args.category, center.lat, center.lon, r, kwRaw);
+        source += "（Photon）";
+      }
+      const all = elements
         .map((e: any) => {
           const lat = e.lat ?? e.center?.lat, lon = e.lon ?? e.center?.lon;
           const t = e.tags ?? {};
@@ -540,7 +580,7 @@ export const TOOLS: Tool[] = [
           };
         })
         .sort((a: any, b: any) => a.distance_m - b.distance_m);
-      const kw = String(args.keyword ?? "").trim();
+      const kw = kwRaw;
       const cuisine = CUISINE.find(([re]) => re.test(kw))?.[1];
       let places = kw
         ? all.filter((p: any) => `${p.name} ${p.name_ja ?? ""}`.toLowerCase().includes(kw.toLowerCase()) || (cuisine && cuisine.test(p.cuisine ?? "")))
@@ -555,7 +595,7 @@ export const TOOLS: Tool[] = [
         radius_m: r,
         note: note || undefined,
         places: places.slice(0, 12),
-        source: "© OpenStreetMap contributors",
+        source,
         tip: "結果依實際距離排序；評價與排隊狀況可再用 web_search 查 Tabelog / Google",
       };
     },
