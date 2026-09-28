@@ -1225,6 +1225,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       let finalText = "";
       const nudged = new Set<string>();
       const forced = new Set<string>();
+      let emptyRetried = false;
       try {
         for (let step = 0; step < MAX_STEPS; step++) {
           const res = await provider.generate({
@@ -1242,7 +1243,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
               turns = [
                 ...turns,
                 { role: "model", parts: [{ text: res.text || "（略）" }] },
-                { role: "user", parts: [{ text: `（系統提醒：你還沒有呼叫 ${need}，這件事一定要呼叫 ${need} 才算完成，沒有呼叫就不能說已完成。請現在呼叫，再根據結果回答。）` }] },
+                { role: "user", parts: [{ text: `（系統提醒：你還沒有呼叫 ${need}，這件事一定要呼叫 ${need} 才算完成，沒有呼叫就不能說已完成。請現在呼叫，再根據結果完整回答。成員沒看到你剛才那段回答，不用道歉，也不要提到這個提醒。）` }] },
               ];
               continue;
             }
@@ -1259,6 +1260,16 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
                 ];
                 continue;
               }
+            }
+            // 查完工具後偶爾一個字都不回（以為剛才那段被收回的回答已經講過了），再請它回一次
+            if (!res.text.trim() && !emptyRetried && toolsUsed.length && step < MAX_STEPS - 1) {
+              emptyRetried = true;
+              turns = [
+                ...turns,
+                { role: "model", parts: [{ text: "（略）" }] },
+                { role: "user", parts: [{ text: "（系統提醒：你剛才沒有輸出任何文字，成員什麼都沒看到。請根據上面的工具結果，直接完整回覆成員，不用道歉。）" }] },
+              ];
+              continue;
             }
             finalText = res.text;
             break;
@@ -1279,7 +1290,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
           turns = [...turns, { role: "model", parts: modelParts }, { role: "user", parts: resultParts }];
           if (step === MAX_STEPS - 1) finalText = res.text || "（查了很多資料，但還沒整理完，請再問一次更具體的問題 🙏）";
         }
-        if (!finalText.trim()) finalText = "嗯…我沒有想到好的回答，可以換個方式問我嗎？";
+        if (!finalText.trim()) finalText = images.length ? "幫你找到這些圖片 👇（網路圖片，僅供參考）" : "嗯…我沒有想到好的回答，可以換個方式問我嗎？";
         const row = this.insertMessage({
           id, author: AI_NAME, role: "assistant", text: finalText, photo_id: null, lat: null, lon: null,
           meta: JSON.stringify({
@@ -1370,7 +1381,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
     toolsUsed.push(need);
     this.broadcast({ type: "ai_tool", id, name: need, label: toolLabel(need), args });
     const result = await runTool(need, args, ctx);
-    return `（系統已經幫你執行 ${need}，結果如下。請根據結果重新回答，不要自己產生任何圖片或搜尋連結；圖片會自動顯示在回答下方。）\n${JSON.stringify(result).slice(0, 6000)}`;
+    return `（系統已經幫你執行 ${need}，結果如下。請根據結果完整回答成員，不用道歉；不要自己產生任何圖片或搜尋連結，圖片會自動顯示在回答下方。）\n${JSON.stringify(result).slice(0, 6000)}`;
   }
 
   /** share：可用的 Gemini 額度比例；maxWait：額度滿時最多等幾毫秒，超過就改用備援 */
