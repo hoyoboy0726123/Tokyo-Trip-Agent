@@ -33,6 +33,7 @@ export interface ExpenseInput {
 export interface AttachedImage {
   src: string; // 經過本站轉送的網址
   caption: string;
+  label?: string; // 這張圖是哪個地點（搜尋關鍵字）
   source: string; // 圖片所在網站
   page?: string; // 來源網頁
 }
@@ -185,7 +186,7 @@ const IMG_MAX_BYTES = 1_500_000;
 async function imageUsable(url: string): Promise<boolean> {
   try {
     if (!/^https?:\/\//.test(url)) return false;
-    const res = await fetch(url, { headers: { "user-agent": IMG_UA, accept: "image/*" }, signal: AbortSignal.timeout(6_000) });
+    const res = await fetch(url, { headers: { "user-agent": IMG_UA, accept: "image/*" }, signal: AbortSignal.timeout(4_000) });
     const type = res.headers.get("content-type") ?? "";
     const size = Number(res.headers.get("content-length") || 0);
     await res.body?.cancel();
@@ -342,55 +343,78 @@ export const TOOLS: Tool[] = [
     label: "🖼 找圖片",
     decl: {
       name: "find_images",
-      description: "上網找照片（餐廳外觀、料理、景點、商品），找到的圖片會自動顯示在你的回答下方。只有成員明確要求看照片／圖片時才使用。",
+      description:
+        "上網找照片（餐廳外觀、料理、景點、商品），找到的圖片會自動顯示在你的回答下方。只有成員明確要求看照片／圖片時才使用。" +
+        "要看好幾個地方（例如剛才推薦的幾家店）就把每個地方放進 queries 一次查完。",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "搜尋關鍵字，用日文或英文並加上地名，例如「一風堂 池袋 ラーメン」「亀有 両津勘吉 銅像」" },
-          count: { type: "integer", description: "要幾張，預設 4，最多 6" },
+          query: { type: "string", description: "單一搜尋關鍵字：店名或景點名稱加地名，例如「一風堂 池袋 ラーメン」「亀有 両津勘吉 銅像」" },
+          queries: { type: "array", items: { type: "string" }, description: "要看好幾個地方時用，每個地方一個關鍵字，最多 4 個，例如 [\"必勝客 板橋\", \"阿勝麻辣雞 板橋\"]" },
+          count: { type: "integer", description: "總共要幾張，預設 4，最多 6" },
         },
-        required: ["query"],
       },
     },
     async run(args, { env, attachImage }) {
       if (!env.TAVILY_API_KEY) return { error: "尚未設定 TAVILY_API_KEY，無法找圖片" };
-      const res = await fetch("https://api.tavily.com/search", {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${env.TAVILY_API_KEY.trim()}` },
-        body: JSON.stringify({ query: args.query, max_results: 5, include_images: true, include_image_descriptions: true, search_depth: "basic" }),
-        signal: AbortSignal.timeout(20_000),
-      });
-      if (!res.ok) return { error: `找圖片失敗 ${res.status}` };
-      const d: any = await res.json();
+      const list: string[] = (Array.isArray(args.queries) && args.queries.length ? args.queries : [args.query])
+        .map((q: unknown) => String(q ?? "").trim())
+        .filter(Boolean)
+        .slice(0, 4);
+      if (!list.length) return { error: "請提供要找圖片的地點或關鍵字" };
+      const total = Math.min(Math.max(Number(args.count) || 4, list.length), 6);
+      // 小店的網路照片常常不能用，每個地方多留一張候選
+      const perQuery = Math.max(1, Math.ceil(total / list.length));
 
-      const seen = new Set<string>();
-      const candidates: { url: string; description: string; page?: string }[] = [];
-      const add = (img: any, page?: string) => {
-        const url = typeof img === "string" ? img : img?.url;
-        if (!url || seen.has(url)) return;
-        seen.add(url);
-        candidates.push({ url, description: typeof img === "string" ? "" : String(img.description ?? ""), page });
-      };
-      for (const img of d.images ?? []) add(img);
-      for (const r of d.results ?? []) for (const img of r.images ?? []) add(img, r.url);
+      // 每個關鍵字各自搜尋、各自檢查圖片能不能顯示（約三成會擋外連、不是圖片或太大）
+      const groups = await Promise.all(
+        list.map(async (query) => {
+          try {
+            const res = await fetch("https://api.tavily.com/search", {
+              method: "POST",
+              headers: { "content-type": "application/json", authorization: `Bearer ${env.TAVILY_API_KEY!.trim()}` },
+              body: JSON.stringify({ query, max_results: 5, include_images: true, include_image_descriptions: true, search_depth: "basic" }),
+              signal: AbortSignal.timeout(20_000),
+            });
+            if (!res.ok) return { query, picked: [] as { url: string; description: string; page?: string }[] };
+            const d: any = await res.json();
+            const seen = new Set<string>();
+            const candidates: { url: string; description: string; page?: string }[] = [];
+            const add = (img: any, page?: string) => {
+              const url = typeof img === "string" ? img : img?.url;
+              if (!url || seen.has(url)) return;
+              seen.add(url);
+              candidates.push({ url, description: typeof img === "string" ? "" : String(img.description ?? ""), page });
+            };
+            for (const img of d.images ?? []) add(img);
+            for (const r of d.results ?? []) for (const img of r.images ?? []) add(img, r.url);
+            const checked = await Promise.all(candidates.slice(0, 8).map(async (c) => ((await imageUsable(c.url)) ? c : null)));
+            return { query, picked: checked.filter((c): c is NonNullable<typeof c> => !!c).slice(0, perQuery) };
+          } catch {
+            return { query, picked: [] as { url: string; description: string; page?: string }[] };
+          }
+        }),
+      );
 
-      // 約三成圖片會擋外連、不是圖片或太大，先檢查再給
-      const checked = await Promise.all(candidates.slice(0, 12).map(async (c) => ((await imageUsable(c.url)) ? c : null)));
-      const count = Math.min(Math.max(Number(args.count) || 4, 1), 6);
-      const picked = checked.filter((c): c is NonNullable<typeof c> => !!c).slice(0, count);
-      for (const p of picked) {
-        attachImage?.({
-          src: `/api/img?u=${encodeURIComponent(p.url)}&s=${await sign(env, "img:" + p.url)}`,
-          caption: p.description.slice(0, 120),
-          source: new URL(p.url).host,
-          page: p.page,
-        });
+      const results: { query: string; found: number; descriptions: string[] }[] = [];
+      for (const g of groups) {
+        for (const p of g.picked) {
+          attachImage?.({
+            src: `/api/img?u=${encodeURIComponent(p.url)}&s=${await sign(env, "img:" + p.url)}`,
+            caption: p.description.slice(0, 120),
+            label: g.query,
+            source: new URL(p.url).host,
+            page: p.page,
+          });
+        }
+        results.push({ query: g.query, found: g.picked.length, descriptions: g.picked.map((p) => p.description.slice(0, 100)) });
       }
-      if (!picked.length) return { found: 0, note: "找不到可以顯示的圖片，可以換個關鍵字（日文或英文）再試" };
+      const found = results.reduce((s, r) => s + r.found, 0);
+      if (!found) return { found: 0, note: "找不到可以顯示的圖片，可以換個關鍵字（日文或英文）再試" };
       return {
-        found: picked.length,
-        images: picked.map((p, i) => ({ no: i + 1, description: p.description, source: new URL(p.url).host })),
-        note: "圖片已自動顯示在回答下方，文字裡不要貼圖片網址；可依描述簡單說明每張圖，並提醒是網路圖片、不一定是同一家分店，僅供參考",
+        found,
+        results,
+        note: "圖片已自動顯示在回答下方（每張都標了地點名稱）。文字裡不要貼圖片網址或任何搜尋連結；簡單說明找到哪些地方的圖，並提醒是網路圖片、不一定是同一家分店，僅供參考",
       };
     },
   },

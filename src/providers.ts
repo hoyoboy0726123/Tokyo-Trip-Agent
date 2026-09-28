@@ -175,9 +175,16 @@ export function workersAIProvider(env: Env, model?: string): Provider {
         return { id: c.id || `call_${crypto.randomUUID().slice(0, 8)}`, name: fn.name, args };
       });
       if (text && !calls.length) onDelta?.(text);
-      return { text: typeof text === "string" ? text : JSON.stringify(text), calls };
+      return { text: typeof text === "string" ? cleanModelText(text) : JSON.stringify(text), calls };
     },
   };
+}
+
+const CHANNEL_TAG = /<\|?\/?channel\|?>/g;
+
+/** Gemma 偶爾把對話樣板的標記（開頭的 thought、<channel|>）混進回答，清掉 */
+function cleanModelText(s: string): string {
+  return s.replace(CHANNEL_TAG, "").replace(/^\s*thought\s*\n/, "").replace(/^\s+/, "");
 }
 
 /** Workers AI 串流（SSE）：同時支援 OpenAI 格式（choices[].delta）與舊格式（response） */
@@ -195,9 +202,18 @@ async function streamWorkersAI(env: Env, model: string, input: Record<string, un
   // 模型有時先講一段話再決定呼叫工具；先暫存開頭，確定不是工具呼叫再送出
   const flush = (force = false) => {
     if (calls.size || legacyCalls.length) return;
-    if (!sentAny && !force && text.length < 12) return;
-    while (pending.length) onDelta(pending.shift()!);
-    sentAny = true;
+    // 開頭先多收一點，才能清掉 Gemma 偶爾夾帶的「thought <channel|>」標記
+    if (!sentAny) {
+      if (!force && text.length < 24) return;
+      const head = cleanModelText(pending.splice(0).join(""));
+      if (head) onDelta(head);
+      sentAny = true;
+      return;
+    }
+    while (pending.length) {
+      const piece = pending.shift()!.replace(CHANNEL_TAG, "");
+      if (piece) onDelta(piece);
+    }
   };
 
   for (;;) {
@@ -253,7 +269,7 @@ async function streamWorkersAI(env: Env, model: string, input: Record<string, un
       }
       return { id: c.id || `call_${crypto.randomUUID().slice(0, 8)}`, name: c.name, args };
     });
-  return { text, calls: parsed };
+  return { text: cleanModelText(text), calls: parsed };
 }
 
 /** gemini = 主要模型；gemini-backup = 另一個 Gemini 模型（目前備援順序未使用） */

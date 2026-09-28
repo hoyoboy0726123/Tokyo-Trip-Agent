@@ -781,7 +781,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 問路：用 plan_route 給 Google Maps 連結，必要時用 web_search 補充轉乘與票價。
 - 成員在哪裡，一律以「成員最近位置」或訊息裡附的地名為準，絕對不要自己猜地名；以前聊天裡說過的位置可能已經過時，不要沿用。
 - 每次有人問「附近」都要重新呼叫工具查詢，不可以沿用之前的回答。
-- 成員要求看照片／圖片時，用 find_images（關鍵字用日文或英文加地名）；圖片會自動顯示在回答下方，文字裡不要貼圖片網址，並提醒是網路圖片、僅供參考。沒有要求就不要找圖片。
+- 成員要求看照片／圖片時，一定要用 find_images（店名或景點名稱加地名；好幾個地方就放進 queries 一次查完）；圖片會自動顯示在回答下方。絕對不要自己產生圖片網址或 Google 圖片搜尋連結，並提醒是網路圖片、僅供參考。沒有要求就不要找圖片。
 - 問「我附近有什麼」：直接用 find_nearby，near 留空（系統會自動用發問者的 GPS），回答時列出實際店名、距離、步行分鐘與地圖連結，不要只給「附近有很多」這種泛泛建議；需要評價再用 web_search 補充。問「某個地方附近有什麼」（例如龜有公園附近），也要用 find_nearby，near 填日文地名（亀有公園）。問「我在哪」用 get_member_locations，說出區域與最近的車站。
 - 迪士尼當天問排隊，用 disney_wait_times。
 - 有人說「我付了／花了…」→ 用 add_expense 記帳；問「花多少、怎麼分」→ expense_summary。
@@ -851,6 +851,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       this.broadcast({ type: "ai_start", id, provider: provider.id, model: provider.model });
       let finalText = "";
       let nudged = false;
+      let forced = false;
       try {
         for (let step = 0; step < MAX_STEPS; step++) {
           const res = await provider.generate({
@@ -871,6 +872,20 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
                 { role: "user", parts: [{ text: `（系統提醒：你還沒有呼叫 ${need}，這個問題一定要先呼叫 ${need} 查詢，再根據結果重新回答。）` }] },
               ];
               continue;
+            }
+            // 提醒過還是不呼叫：系統自己執行工具，再請模型根據結果回答
+            if (need && nudged && !forced && step < MAX_STEPS - 1) {
+              forced = true;
+              const note = await this.forceTool(need, provider, history, trigger, user, id, images, toolsUsed);
+              if (note) {
+                this.broadcast({ type: "ai_reset", id });
+                turns = [
+                  ...turns,
+                  { role: "model", parts: [{ text: res.text || "（略）" }] },
+                  { role: "user", parts: [{ text: note }] },
+                ];
+                continue;
+              }
             }
             finalText = res.text;
             break;
@@ -915,6 +930,52 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       meta: JSON.stringify({ error: true }),
     });
     this.broadcast({ type: "ai_done", id, message: this.publicMessage(row) });
+  }
+
+  /**
+   * 模型提醒過仍不呼叫工具時，由系統代為執行，回傳要交給模型的結果說明。
+   * find_images：先請模型（JSON 模式，很穩定）從對話整理出要找圖的地點，再一次查完。
+   */
+  private async forceTool(
+    need: string, provider: Provider, history: MessageRow[], trigger: MessageRow, user: Attachment,
+    id: string, images: AttachedImage[], toolsUsed: string[],
+  ): Promise<string | null> {
+    const ctx = { env: this.env, room: this, author: user.name, attachImage: (img: AttachedImage) => images.length < 8 && images.push(img) };
+    let args: Record<string, unknown>;
+    if (need === "find_images") {
+      const lastAi = [...history].reverse().find((m) => m.role === "assistant" && m.id !== id)?.text ?? "";
+      const area = this.memberLocation(user.name)[0]?.area ?? "";
+      let queries: string[] = [];
+      try {
+        const r = await provider.generate({
+          system: "你只輸出 JSON。",
+          turns: [{
+            role: "user",
+            parts: [{
+              text: `成員說：「${trigger.text}」\n上一則 AI 回答：\n${lastAi.slice(0, 1500)}\n成員所在地區：${area || "未知"}\n\n成員想看哪些地點、店家或東西的照片？列出搜尋關鍵字（名稱加地名），最多 4 個。只輸出 JSON：{"queries":["..."]}`,
+            }],
+          }],
+          json: true,
+        });
+        const j = JSON.parse(r.text.replace(/^\s*```(?:json)?|```\s*$/g, "").trim());
+        queries = (j.queries ?? []).map((q: unknown) => String(q).trim()).filter(Boolean).slice(0, 4);
+      } catch {}
+      if (!queries.length) queries = [trigger.text.replace(/給我看|提供|請|幫我找|的?(照片|圖片|相片)|你推薦的/g, "").trim() || trigger.text];
+      args = { queries, count: Math.min(queries.length * 2, 6) };
+    } else if (need === "find_nearby") {
+      const t = trigger.text;
+      const category =
+        /便利商店|超商|コンビニ/.test(t) ? "convenience" : /藥妝|藥局|藥/.test(t) ? "drugstore" : /廁所|洗手間|トイレ/.test(t) ? "toilet"
+        : /咖啡|cafe/i.test(t) ? "cafe" : /超市/.test(t) ? "supermarket" : /ATM|提款/i.test(t) ? "atm" : /置物櫃|寄物/.test(t) ? "locker"
+        : /車站|捷運|地鐵|電車/.test(t) ? "station" : /公園|遊樂場/.test(t) ? "park" : /購物|百貨|商場|逛街/.test(t) ? "shopping" : "food";
+      args = { category };
+    } else {
+      return null;
+    }
+    toolsUsed.push(need);
+    this.broadcast({ type: "ai_tool", id, name: need, label: toolLabel(need), args });
+    const result = await runTool(need, args, ctx);
+    return `（系統已經幫你執行 ${need}，結果如下。請根據結果重新回答，不要自己產生任何圖片或搜尋連結；圖片會自動顯示在回答下方。）\n${JSON.stringify(result).slice(0, 6000)}`;
   }
 
   /** share：可用的 Gemini 額度比例；maxWait：額度滿時最多等幾毫秒，超過就改用備援 */

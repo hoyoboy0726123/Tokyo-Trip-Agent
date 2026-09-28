@@ -219,7 +219,7 @@ function messageNode(msg) {
         const link = /^https?:\/\//.test(im.page ?? "") ? im.page : null;
         return `<figure>
           <img class="photo web" src="${escapeHtml(im.src)}" loading="lazy" alt="${escapeHtml(im.caption)}" onerror="this.closest('figure').remove()" />
-          <figcaption>${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(im.source)}</a>` : escapeHtml(im.source)}</figcaption>
+          <figcaption>${im.label ? `<b>${escapeHtml(im.label)}</b><br>` : ""}${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(im.source)}</a>` : escapeHtml(im.source)}</figcaption>
         </figure>`;
       })
       .join("")}</div><div class="small muted">🖼 網路圖片，僅供參考</div>`;

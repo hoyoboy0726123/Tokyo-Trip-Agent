@@ -94,7 +94,8 @@ input, textarea, select { font: inherit; color: inherit; }
 .gallery { display: flex; gap: 8px; overflow-x: auto; margin: 8px 0 4px; padding-bottom: 4px; scroll-snap-type: x mandatory; }
 .gallery figure { flex: none; width: 150px; margin: 0; scroll-snap-align: start; }
 .bubble .gallery img.photo.web { width: 150px; height: 112px; max-height: none; object-fit: cover; margin: 0; border-radius: 10px; background: var(--line); }
-.gallery figcaption { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+.gallery figcaption { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; line-height: 1.35; }
+.gallery figcaption b { color: var(--ink); }
 .gallery figcaption a { color: var(--muted); }
 .meta { font-size: 11px; color: var(--muted); padding: 0 4px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .tool-chip { background: var(--red-soft); color: var(--red); border-radius: 999px; padding: 2px 8px; font-size: 12px; }
