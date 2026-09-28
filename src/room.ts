@@ -55,7 +55,8 @@ const INTENTS: { tool: string; test: (text: string, hasPhoto: boolean) => boolea
   { tool: "add_expense", test: (t, p) => (p && /收據|發票|記帳/.test(t)) || /(我付了|付了|花了|請客|記帳).{0,20}\d/.test(t) || /\d.{0,12}(日圓|円|元).{0,12}(我付|付的|記帳)/.test(t) },
   { tool: "create_reminder", test: (t) => /提醒(我|大家|全家|我們)/.test(t) && /\d/.test(t) },
   { tool: "update_checklist_item", test: (t) => /買到了|買好了|帶了|帶好了|打勾|已經買|辦好了|已經填|已經訂/.test(t) },
-  { tool: "add_checklist_items", test: (t) => /想買|要買|加入.{0,4}清單|記得帶|要帶/.test(t) },
+  // 只在明確說要加進清單時才算；「想買…幫我推薦」這類只是詢問，不能自動加
+  { tool: "add_checklist_items", test: (t) => /(加入|加到|加進|放進|放到|列入|記到|記進|寫進|存進).{0,8}(清單|待辦)|清單.{0,4}(加|新增|放)/.test(t) },
   { tool: "taxi_fare", test: (t) => /(計程車|taxi|叫車|的士).{0,20}(多少|費用|車資|多久|錢|價)/i.test(t) || /車資/.test(t) },
   { tool: "japan_alerts", test: (t) => /地震|颱風|海嘯|警報|豪雨/.test(t) },
   { tool: "train_status", test: (t) => /延誤|停駛|誤點|停開|運行狀況|電車.{0,6}(正常|狀況)/.test(t) },
@@ -1149,7 +1150,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 迪士尼當天問排隊，用 disney_wait_times。
 - 問電車有沒有延誤、停駛 → train_status；問計程車多少錢、要多久 → taxi_fare；問地震、颱風、天氣會不會影響行程 → japan_alerts。
 - 收到收據照片（或說「記帳這張收據」）：讀出店名、含稅總金額與主要品項，用 add_expense 記帳（description 寫「店名：品項」），付款人預設是發問者；若是免稅店或金額可能達免稅門檻，順便提醒。
-- 想買的東西、要帶的行李、待辦事項 → add_checklist_items；買到了、帶了、辦好了 → update_checklist_item；問清單 → get_checklist。
+- 只有成員明確說「加入／加到清單」時才用 add_checklist_items。只是說想買、要帶、問推薦，都不可以自動加入清單；可以在回答最後問一句要不要加進清單。買到了、帶了、辦好了 → update_checklist_item；問清單 → get_checklist。
 - 要求「幾點提醒」→ create_reminder（時間用東京時間 YYYY-MM-DD HH:mm）。
 - 傳照片說要「存起來／存成票券」→ save_document；問「給我看○○的票／訂位」→ find_documents。
 - 有人傳「🆘」走散求助：先安撫，用 get_member_locations 看大家在哪，建議就近約在明顯地標或車站剪票口集合，提醒可找工作人員幫忙、緊急打 110。

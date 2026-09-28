@@ -906,8 +906,8 @@ const GUIDE = [
   ["✅", "共用清單", "購物、行李、待辦，全家同步", [
     "到 🧰 → ✅ 清單，分成<b>購物、行李、待辦</b>三頁。",
     "一行打一項，可以填「給誰」；完成後打勾，全家的畫面都會同步。",
-    "也可以直接在聊天說，AI 會自動加進清單或幫你打勾。",
-  ], ["哥哥想買皮卡丘玩偶，媽媽想買無印良品收納盒", "護照已經帶好了，幫我打勾"]],
+    "也可以在聊天請 AI 加：要明確說「<b>加入清單</b>」才會加，只是說想買或問推薦不會自動加。",
+  ], ["把皮卡丘玩偶加入購物清單，給哥哥", "護照已經帶好了，幫我打勾"]],
   ["🎫", "票券保管箱", "門票、訂位確認，沒網路也能看", [
     "到 🧰 → 🎫 票券，輸入名稱、選照片，按「上傳」。",
     "也可以在聊天傳照片，說「存成票券」。",
@@ -1063,7 +1063,7 @@ function renderChecklistPanel(st, b) {
             <span><input type="checkbox" data-id="${c.id}" ${c.done ? "checked" : ""} /> ${escapeHtml(c.item)}${c.for ? ` <span class="tag">${escapeHtml(c.for)}</span>` : ""}${c.done_by ? `<span class="small muted">（${escapeHtml(c.done_by)} ✓）</span>` : ""}</span>
             <button class="btn danger small" data-del="${c.id}" type="button">✕</button></label>`).join("")
         : `<div class="small muted">還沒有項目</div>`}
-    </div><div class="small muted" style="margin-top:6px">剩 ${left} 項。也可以在聊天說「哥哥想買皮卡丘玩偶」「護照帶了」，AI 會自動更新。</div></div>
+    </div><div class="small muted" style="margin-top:6px">剩 ${left} 項。也可以在聊天說「把皮卡丘玩偶加入購物清單」「護照帶了」，AI 會幫你更新。</div></div>
     <div class="card"><form class="form" id="ck-form">
       <textarea name="item" rows="2" placeholder="一行一項，例如：&#10;皮卡丘玩偶&#10;無印良品收納盒" required></textarea>
       <div class="row"><input name="forWhom" placeholder="給誰（可留空）" style="flex:1" /><button class="btn primary-sm">加入${checklistTab}</button></div>

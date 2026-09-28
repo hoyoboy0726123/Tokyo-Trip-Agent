@@ -934,7 +934,7 @@ export const TOOLS: Tool[] = [
     label: "✅ 清單",
     decl: {
       name: "add_checklist_items",
-      description: "把東西加進全家共用清單：購物清單（想買的東西）、行李清單、待辦事項。例如「哥哥想買皮卡丘玩偶」→ 購物。",
+      description: "把東西加進全家共用清單：購物、行李、待辦。只有成員明確要求加入清單時才能使用，例如「把皮卡丘玩偶加入購物清單」；只是說想買或問推薦時不要使用。",
       parameters: {
         type: "object",
         properties: {
