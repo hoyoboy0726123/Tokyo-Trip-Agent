@@ -134,6 +134,66 @@ async function geocode(place: string): Promise<{ name: string; lat: number; lon:
   return r ? { name: r.name, lat: r.latitude, lon: r.longitude } : null;
 }
 
+const COORD_RE = /^\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)\s*$/;
+// 繁體字地名換成日文漢字，日本地圖資料才查得到（例如 龜有→亀有、舞濱→舞浜）
+const JA_KANJI: Record<string, string> = { 龜: "亀", 濱: "浜", 澤: "沢", 櫻: "桜", 驛: "駅", 樂: "楽", 國: "国", 廣: "広", 淺: "浅", 邊: "辺", 黑: "黒", 圓: "円", 學: "学", 藝: "芸", 橫: "横", 關: "関", 鹽: "塩", 戶: "戸" };
+
+/** 地名或座標 → 位置。座標直接用；地名先查 OpenStreetMap（車站、公園、店名較準），再退回 Open-Meteo */
+async function locate(place: string): Promise<{ name: string; lat: number; lon: number } | null> {
+  const m = place.match(COORD_RE);
+  if (m) return { name: `${m[1]},${m[2]}`, lat: Number(m[1]), lon: Number(m[2]) };
+  const ja = [...place].map((c) => JA_KANJI[c] ?? c).join("");
+  for (const q of [...new Set([ja, place])]) {
+    try {
+      const r = (await getJSON(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=jp&accept-language=ja&q=${encodeURIComponent(q)}`))[0];
+      if (r) return { name: r.name || q, lat: Number(r.lat), lon: Number(r.lon) };
+    } catch {}
+  }
+  try {
+    return await geocode(ja);
+  } catch {
+    return null;
+  }
+}
+
+/** 發問者 3 小時內分享過的位置（沒有就用其他成員的） */
+function recentLocation(room: RoomApi, author: string) {
+  const fresh = (l?: { ts: number }) => !!l && Date.now() - l.ts < 3 * 3600_000;
+  const mine = room.memberLocation(author)[0];
+  if (fresh(mine)) return mine;
+  const other = room.memberLocation()[0];
+  return fresh(other) ? other : null;
+}
+
+async function overpass(query: string): Promise<any> {
+  const body = "data=" + encodeURIComponent(query);
+  let lastError: unknown;
+  for (const url of ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]) {
+    try {
+      return await getJSON(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError;
+}
+
+// 料理關鍵字 → OpenStreetMap 的 cuisine 標籤（店名沒寫「ラーメン」的拉麵店也找得到）
+const CUISINE: [RegExp, RegExp][] = [
+  [/ラーメン|らーめん|拉麵|拉面|ramen/i, /ramen/],
+  [/寿司|壽司|すし|鮨|sushi/i, /sushi/],
+  [/焼肉|燒肉|烤肉|yakiniku/i, /yakiniku|barbecue/],
+  [/うどん|烏龍麵|udon/i, /udon/],
+  [/そば|蕎麥|soba/i, /soba/],
+  [/カレー|咖哩|curry/i, /curry/],
+  [/とんかつ|豬排|tonkatsu/i, /tonkatsu/],
+  [/天ぷら|天婦羅|tempura/i, /tempura/],
+  [/丼|donburi/i, /donburi|gyudon/],
+  [/カフェ|咖啡|cafe|coffee/i, /coffee|cafe/],
+  [/ハンバーガー|漢堡|burger/i, /burger/],
+  [/ピザ|披薩|pizza/i, /pizza/],
+];
+
 // ---------------- 附近地點（OpenStreetMap Overpass） ----------------
 
 const NEARBY: Record<string, string> = {
@@ -239,7 +299,7 @@ export const TOOLS: Tool[] = [
     async run(args) {
       let loc = { name: "要町（住宿）", lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon };
       if (args.place) {
-        const g = await geocode(args.place);
+        const g = await locate(String(args.place));
         if (g) loc = g;
       }
       const days = Math.min(Math.max(Number(args.days) || 7, 1), 14);
@@ -292,7 +352,7 @@ export const TOOLS: Tool[] = [
     label: "📍 成員位置",
     decl: {
       name: "get_member_locations",
-      description: "取得成員最近分享的 GPS 位置與附近地址。回答「附近」「我在哪」「怎麼去」類問題時先用這個。",
+      description: "取得成員最近分享的 GPS 位置：所在區域、地址、最近的車站與距離。回答「我在哪」或要知道某位成員在哪時使用。",
       parameters: { type: "object", properties: { name: { type: "string", description: "成員名稱，留空=全部" } } },
     },
     async run(args, { room }) {
@@ -300,12 +360,27 @@ export const TOOLS: Tool[] = [
       if (!locs.length) return { error: "還沒有人分享位置。請按輸入框旁的 📍 分享位置。" };
       const out = [];
       for (const l of locs.slice(0, 4)) {
-        let address = "";
+        let address = "", area = "";
         try {
-          const g = await getJSON(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${l.lat}&lon=${l.lon}&accept-language=ja,zh-TW&zoom=17`);
+          const g = await getJSON(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${l.lat}&lon=${l.lon}&accept-language=ja&zoom=18`);
           address = g.display_name ?? "";
+          const a = g.address ?? {};
+          area = [a.city || a.town, a.city_district || a.suburb, a.quarter || a.neighbourhood].filter(Boolean).join(" ");
         } catch {}
-        out.push({ ...l, minutes_ago: Math.round((Date.now() - l.ts) / 60000), address, map: mapsLink(l) });
+        let nearestStation: { name: string; distance_m: number; walk_min: number } | null = null;
+        try {
+          const d = await overpass(`[out:json][timeout:15];nwr(around:1500,${l.lat},${l.lon})["railway"="station"];out center 30;`);
+          const s = (d.elements ?? [])
+            .map((e: any) => ({ name: e.tags?.name, distance_m: distanceM(l.lat, l.lon, e.lat ?? e.center?.lat, e.lon ?? e.center?.lon) }))
+            .filter((x: any) => x.name)
+            .sort((a: any, b: any) => a.distance_m - b.distance_m)[0];
+          if (s) nearestStation = { ...s, walk_min: Math.max(1, Math.round(s.distance_m / 80)) };
+        } catch {}
+        out.push({
+          name: l.name, lat: l.lat, lon: l.lon, accuracy_m: l.accuracy,
+          minutes_ago: Math.round((Date.now() - l.ts) / 60000),
+          area, nearest_station: nearestStation, address, map: mapsLink(l),
+        });
       }
       return out;
     },
@@ -314,52 +389,69 @@ export const TOOLS: Tool[] = [
     label: "🗺 找附近",
     decl: {
       name: "find_nearby",
-      description: "找附近的地點（餐廳、咖啡、便利商店、藥妝、超市、廁所、ATM、置物櫃、車站、購物、公園）。預設以發問者的位置為中心。",
+      description: "找實際距離最近的地點（餐廳、咖啡、便利商店、藥妝、超市、廁所、ATM、置物櫃、車站、購物、公園），依距離排序並附步行分鐘。問「我附近」時 near 一定留空，系統會自動用發問者的 GPS 位置。",
       parameters: {
         type: "object",
         properties: {
           category: { type: "string", enum: Object.keys(NEARBY) },
-          keyword: { type: "string", description: "名稱或料理關鍵字過濾，例如 ラーメン、寿司、ユニクロ" },
-          near: { type: "string", description: "地名；留空=發問者目前位置，沒有位置就用住宿" },
-          radius_m: { type: "integer", description: "搜尋半徑公尺，預設 600" },
+          keyword: { type: "string", description: "店名或料理類型，例如 ラーメン、寿司、焼肉、ユニクロ" },
+          near: { type: "string", description: "只有要查「別的地方」附近才填，用日文地名，例如 亀有公園、浅草寺、舞浜駅。問「我附近」請留空" },
+          radius_m: { type: "integer", description: "搜尋半徑公尺，預設 600，最大 2000" },
         },
         required: ["category"],
       },
     },
     async run(args, { room, author }) {
-      let center = { lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon, label: "住宿（要町）" };
+      const mine = recentLocation(room, author);
+      let center: { lat: number; lon: number; label: string } | null = null;
+      let note = "";
       if (args.near) {
-        const g = await geocode(args.near);
-        if (g) center = { ...g, label: g.name };
-      } else {
-        const mine = room.memberLocation(author)[0] ?? room.memberLocation()[0];
-        if (mine && Date.now() - mine.ts < 3 * 3600_000) center = { lat: mine.lat, lon: mine.lon, label: `${mine.name} 的位置` };
+        const g = await locate(String(args.near));
+        if (g) center = { lat: g.lat, lon: g.lon, label: COORD_RE.test(String(args.near)) ? "指定座標" : g.name };
+        else note = `找不到「${args.near}」這個地點，改用${mine ? "發問者目前位置" : "住宿"}為中心`;
+      }
+      if (!center && mine) center = { lat: mine.lat, lon: mine.lon, label: `${mine.name} 的 GPS 位置（${Math.round((Date.now() - mine.ts) / 60000)} 分鐘前）` };
+      if (!center) {
+        center = { lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon, label: "住宿（要町）" };
+        note ||= "沒有成員分享位置，先以住宿為中心；要找自己附近請先按 📍 分享位置";
       }
       const r = Math.min(Math.max(Number(args.radius_m) || 600, 100), 2000);
       const q = (NEARBY[args.category] ?? NEARBY.food).replaceAll("{r}", String(r)).replaceAll("{lat}", String(center.lat)).replaceAll("{lon}", String(center.lon));
-      const d = await getJSON("https://overpass-api.de/api/interpreter", {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: "data=" + encodeURIComponent(`[out:json][timeout:20];(${q});out center 80;`),
-      });
-      const kw = String(args.keyword ?? "").toLowerCase();
-      const places = (d.elements ?? [])
+      const d = await overpass(`[out:json][timeout:20];(${q});out center 150;`);
+      const all = (d.elements ?? [])
         .map((e: any) => {
           const lat = e.lat ?? e.center?.lat, lon = e.lon ?? e.center?.lon;
           const t = e.tags ?? {};
+          const distance = distanceM(center.lat, center.lon, lat, lon);
           return {
             name: t["name:zh"] || t.name || t["name:en"] || "(無名稱)",
             name_ja: t.name,
             cuisine: t.cuisine,
             opening_hours: t.opening_hours,
-            distance_m: distanceM(center.lat, center.lon, lat, lon),
+            distance_m: distance,
+            walk_min: Math.max(1, Math.round(distance / 80)),
             map: mapsLink(t.name ? `${t.name} ${lat},${lon}` : { lat, lon }),
           };
         })
-        .filter((p: any) => !kw || JSON.stringify(p).toLowerCase().includes(kw))
-        .sort((a: any, b: any) => a.distance_m - b.distance_m)
-        .slice(0, 12);
-      return { center: center.label, radius_m: r, places, source: "© OpenStreetMap contributors", tip: "評價與排隊狀況可再用 web_search 查 Tabelog / Google" };
+        .sort((a: any, b: any) => a.distance_m - b.distance_m);
+      const kw = String(args.keyword ?? "").trim();
+      const cuisine = CUISINE.find(([re]) => re.test(kw))?.[1];
+      let places = kw
+        ? all.filter((p: any) => `${p.name} ${p.name_ja ?? ""}`.toLowerCase().includes(kw.toLowerCase()) || (cuisine && cuisine.test(p.cuisine ?? "")))
+        : all;
+      if (kw && !places.length) {
+        note = [note, `半徑 ${r} 公尺內沒有符合「${kw}」的店家資料，以下是附近所有結果；可加大 radius_m 再找，或用 web_search 補充`].filter(Boolean).join("；");
+        places = all;
+      }
+      return {
+        center: center.label,
+        center_coords: `${center.lat.toFixed(5)},${center.lon.toFixed(5)}`,
+        radius_m: r,
+        note: note || undefined,
+        places: places.slice(0, 12),
+        source: "© OpenStreetMap contributors",
+        tip: "結果依實際距離排序；評價與排隊狀況可再用 web_search 查 Tabelog / Google",
+      };
     },
   },
   {
@@ -576,6 +668,7 @@ export async function runTool(name: string, args: any, ctx: ToolContext): Promis
   try {
     return await tool.run(args ?? {}, ctx);
   } catch (e: any) {
+    console.error(`tool ${name} failed`, JSON.stringify(args), e?.message ?? e);
     return { error: String(e?.message ?? e) };
   }
 }

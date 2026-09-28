@@ -326,6 +326,41 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
         }
         this.broadcast({ type: "settings", settings: this.settings() });
         break;
+      case "reset": {
+        // 管理員清除資料：測試結束正式使用前、或換一趟新行程時用。只清勾選的項目
+        if (!user.admin) return reply(false, "只有管理員可以清除資料");
+        const cleared: string[] = [];
+        if (msg.chat) {
+          this.sql.exec("DELETE FROM messages");
+          this.sql.exec("DELETE FROM photos");
+          this.sql.exec("DELETE FROM locations");
+          this.setSetting("memory_cursor", "0");
+          this.broadcast({ type: "cleared" });
+          cleared.push("聊天紀錄");
+        }
+        if (msg.memory) {
+          this.sql.exec("DELETE FROM memories");
+          this.setSetting("summary", "");
+          // 聊天沒清時，舊聊天不再重新整理成記憶
+          if (!msg.chat) this.setSetting("memory_cursor", String(Date.now()));
+          cleared.push("長期記憶");
+        }
+        if (msg.expenses) {
+          this.sql.exec("DELETE FROM expenses");
+          cleared.push("帳目");
+        }
+        if (msg.itinerary) {
+          this.sql.exec("DELETE FROM itinerary");
+          for (const d of INITIAL_ITINERARY) {
+            this.sql.exec("INSERT INTO itinerary VALUES (?, ?, ?, ?, ?, ?)", d.date, d.title, d.detail, d.status, Date.now(), "初始行程");
+          }
+          cleared.push("行程（還原預設）");
+        }
+        if (!cleared.length) return reply(false, "請至少勾選一項");
+        console.log(`reset by ${user.name}: ${cleared.join("、")}`);
+        this.broadcastState();
+        break;
+      }
       default:
         return reply(false, "未知的操作");
     }
@@ -623,7 +658,8 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 營業時間、票價、活動、交通、天氣、排隊等「會變動的資訊」一定要用工具查，並附上來源連結；查不到就說不確定，絕不編造。
 - 工具回傳 error 代表失敗：要如實告訴成員沒有完成，不可以說已完成。記帳前確認分攤對象是否符合成員說的人數。
 - 提到日圓價格時附上約合台幣（用 convert_currency）。
-- 問路：用 plan_route 給 Google Maps 連結，必要時用 web_search 補充轉乘與票價。問「附近」先看成員位置，再用 find_nearby。
+- 問路：用 plan_route 給 Google Maps 連結，必要時用 web_search 補充轉乘與票價。
+- 問「我附近有什麼」：直接用 find_nearby，near 留空（系統會自動用發問者的 GPS），回答時列出實際店名、距離、步行分鐘與地圖連結，不要只給「附近有很多」這種泛泛建議；需要評價再用 web_search 補充。問「某個地方附近有什麼」（例如龜有公園附近），也要用 find_nearby，near 填日文地名（亀有公園）。問「我在哪」用 get_member_locations，說出區域與最近的車站。
 - 迪士尼當天問排隊，用 disney_wait_times。
 - 有人說「我付了／花了…」→ 用 add_expense 記帳；問「花多少、怎麼分」→ expense_summary。
 - 成員做了決定、說了偏好、訂了東西、改了計畫 → 主動用 remember 或 update_itinerary 記下來。只有工具呼叫成功後才能說「已記住／已更新」；沒有呼叫工具就不要聲稱已記住（系統也會在背景定期自動整理記憶）。

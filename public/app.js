@@ -173,6 +173,7 @@ function handle(m) {
       break;
     case "action_result":
       if (!m.ok && m.error) alert(m.error);
+      else if (m.ok && m.action === "reset") alert("已清除 ✅");
       break;
   }
 }
@@ -653,10 +654,10 @@ function renderPanel() {
         </div>
         ${S.me.admin ? `
         <div class="card"><h3>管理員設定</h3>
-          <div class="small muted">AI 模型（出錯時會自動改用另一個）</div>
+          <div class="small muted">主要模型（出錯或額度冷卻時，會自動改用另一個）</div>
           <div class="seg" id="seg-provider">
-            <label><input type="radio" name="provider" value="gemini" ${s.provider !== "workers-ai" ? "checked" : ""} />Gemini</label>
-            <label><input type="radio" name="provider" value="workers-ai" ${s.provider === "workers-ai" ? "checked" : ""} />Workers AI</label>
+            <label><input type="radio" name="provider" value="gemini" ${s.provider !== "workers-ai" ? "checked" : ""} />${escapeHtml(s.geminiModel)}</label>
+            <label><input type="radio" name="provider" value="workers-ai" ${s.provider === "workers-ai" ? "checked" : ""} />${escapeHtml(String(s.workersModel).split("/").pop())}（Workers AI）</label>
           </div>
           <div class="small muted" style="margin-top:10px">AI 回覆時機</div>
           <div class="seg" id="seg-mode">
@@ -666,6 +667,18 @@ function renderPanel() {
           <div class="small muted" style="margin-top:10px">旅伴名單（記帳預設平分對象，用逗號分隔）</div>
           <form class="row" id="travelers-form"><input name="t" value="${escapeHtml(s.travelers || "")}" placeholder="爸爸, 媽媽, 哥哥, 妹妹" style="flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--card)" /><button class="btn primary-sm">儲存</button></form>
           <p class="small muted" style="margin-top:10px">所有聊天紀錄都會永久保存，AI 會自動回想以前聊過的內容。</p>
+        </div>
+        <div class="card"><h3>🧹 清除資料</h3>
+          <p class="small muted">測試結束、正式使用前，或換一趟新行程時使用。只會清除勾選的項目，<b>清除後無法復原</b>。</p>
+          <form class="form" id="reset-form">
+            <div class="checks">
+              <label><input type="checkbox" name="chat" /> 聊天紀錄（含照片、位置）</label>
+              <label><input type="checkbox" name="memory" /> 長期記憶與摘要</label>
+              <label><input type="checkbox" name="expenses" /> 帳目</label>
+              <label><input type="checkbox" name="itinerary" /> 行程還原成預設</label>
+            </div>
+            <button class="btn danger">清除勾選的資料</button>
+          </form>
         </div>` : ""}`;
       b.querySelector("#logout").addEventListener("click", async () => {
         await fetch("/api/logout", { method: "POST" });
@@ -680,6 +693,17 @@ function renderPanel() {
       b.querySelector("#travelers-form")?.addEventListener("submit", (e) => {
         e.preventDefault();
         action({ action: "settings", travelers: new FormData(e.target).get("t") });
+      });
+      b.querySelector("#reset-form")?.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const f = new FormData(e.target);
+        const names = { chat: "聊天紀錄", memory: "長期記憶與摘要", expenses: "帳目", itinerary: "行程（還原成預設）" };
+        const picked = Object.keys(names).filter((k) => f.get(k));
+        if (!picked.length) return alert("請至少勾選一項");
+        const typed = prompt(`即將清除：${picked.map((k) => names[k]).join("、")}\n所有人的資料都會被清除，無法復原。\n\n確定的話請輸入「清除」`);
+        if (typed?.trim() !== "清除") return;
+        action({ action: "reset", ...Object.fromEntries(picked.map((k) => [k, true])) });
+        e.target.reset();
       });
       break;
     }
