@@ -601,12 +601,12 @@ function renderPanel() {
   const b = els.panelBody;
   if (!st) {
     // 離線時只有工具箱與票券能用（票券照片有快取）
-    if (S.panel === "hub" || S.panel === "tickets") return renderToolPanel(null, b);
+    if (S.panel === "hub" || S.panel === "tickets" || S.panel === "guide") return renderToolPanel(null, b);
     els.panelTitle.textContent = "📴 離線中";
     b.innerHTML = `<div class="card small muted">目前沒有網路，這個功能暫時不能用。常用句（🇯🇵）和票券（🧰 → 🎫）離線也能看。</div>`;
     return;
   }
-  if (["hub", "map", "checklist", "tickets", "reminders", "diary"].includes(S.panel)) return renderToolPanel(st, b);
+  if (["hub", "guide", "map", "checklist", "tickets", "reminders", "diary"].includes(S.panel)) return renderToolPanel(st, b);
   switch (S.panel) {
     case "itinerary": {
       els.panelTitle.textContent = "📅 行程";
@@ -821,12 +821,16 @@ function renderToolPanel(st, b) {
   switch (S.panel) {
     case "hub": {
       els.panelTitle.textContent = "🧰 工具箱";
-      b.innerHTML = `<div class="tile-grid">${TOOL_TILES.map(
+      b.innerHTML = `<button class="guide-btn" data-go="guide">📖 功能使用說明<span class="small muted">每個功能怎麼用、可以怎麼問</span></button>
+        <div class="tile-grid">${TOOL_TILES.map(
         ([id, icon, name, desc]) => `<button class="tile" data-go="${id}"><span class="tile-icon">${icon}</span><b>${name}</b><span class="small muted">${desc}</span></button>`,
       ).join("")}</div>`;
       b.querySelectorAll("[data-go]").forEach((x) => x.addEventListener("click", () => openPanel(x.dataset.go)));
       break;
     }
+    case "guide":
+      renderGuidePanel(b);
+      break;
     case "map":
       renderMapPanel(st, b);
       break;
@@ -848,6 +852,91 @@ function renderToolPanel(st, b) {
 const backToHub = () => `<button class="btn small" data-go-hub>← 工具箱</button>`;
 function bindBack(b) {
   b.querySelector("[data-go-hub]")?.addEventListener("click", () => openPanel("hub"));
+}
+
+// ---------- 📖 使用說明 ----------
+
+// [圖示, 名稱, 一句話, 步驟（可含 HTML）, 範例問法]
+const GUIDE = [
+  ["☀️", "每日早報", "每天早上自動發，不用操作", [
+    "旅程期間（10/3–10/10）每天<b>東京時間 07:00</b> 左右，AI 會在群組發一則早報。",
+    "內容有：今天的行程與建議出門時間、天氣和穿著、要不要帶傘、今天的提醒與待辦。",
+    "如果有地震、颱風或豪雨，會放在最前面提醒。",
+    "其他時間想看，直接問就好。",
+  ], ["今天的行程和天氣？"]],
+  ["⏰", "提醒", "時間到在群組通知全家", [
+    "在聊天說「<b>幾月幾號 幾點 提醒大家…</b>」，AI 會設好提醒。",
+    "也可以到 🧰 → ⏰ 提醒，選日期時間、打內容，按「新增提醒」。",
+    "時間到了，AI 會在群組發訊息通知全家。時間一律是<b>東京時間</b>（比台灣快 1 小時）。",
+    "在 ⏰ 提醒頁可以看到還沒發的提醒，也可以刪除。",
+  ], ["10/4 早上 9:30 提醒大家出門去藤子博物館", "有哪些提醒？"]],
+  ["🆘", "地震／颱風警報", "有狀況自動通知，不用操作", [
+    "從出發前一天到回國，系統每 5 分鐘檢查一次日本氣象廳的資料。",
+    "<b>關東震度 3 以上</b>的地震、東京周邊的海嘯、新颱風、隔天的強風豪雨，會自動在群組發警報。",
+    "警報裡附有緊急電話：警察 110、救護車／消防 119、日本觀光局中文熱線 050-3816-2787。",
+    "想確認最近的狀況，也可以直接問。",
+  ], ["最近東京有地震或颱風嗎？會影響行程嗎？"]],
+  ["🚕", "計程車估價", "叫車前先知道大概多少錢", [
+    "直接問「從哪裡到哪裡，計程車要多少錢」。",
+    "AI 會回答距離、車程時間、大概的車資範圍。",
+    "深夜（22:00–05:00）有 20% 加成，會自動依現在的時間計算。",
+    "2 大 2 小可以坐一台一般計程車。",
+  ], ["從住宿叫車到東京迪士尼海洋要多少錢？"]],
+  ["🚆", "電車狀況", "出門前查有沒有延誤、停駛", [
+    "按輸入框上方的快捷鈕「<b>🚆 電車狀況</b>」，或直接問某條線。",
+    "查的是 Yahoo!路線 的即時運行資訊，會告訴你有沒有延誤、停駛與原因。",
+    "如果停駛，可以接著問「那要怎麼改走？」。",
+  ], ["有樂町線、山手線現在有延誤嗎？"]],
+  ["🧾", "收據記帳", "拍收據，AI 幫你記帳", [
+    "按快捷鈕「<b>🧾 收據記帳</b>」→ 拍照或選收據照片。",
+    "輸入框會自動填好「幫我把這張收據記帳（我付的）」；如果是別人付的，改成「媽媽付的」再送出。",
+    "AI 會讀出店名、金額，記到 💰 記帳分帳裡。",
+    "沒有收據也可以用打字的。按 💰 可以看帳目，AI 也能算誰該給誰多少。",
+  ], ["午餐拉麵 3200 日圓，爸爸付的", "目前花了多少錢？大家要怎麼分？"]],
+  ["✅", "共用清單", "購物、行李、待辦，全家同步", [
+    "到 🧰 → ✅ 清單，分成<b>購物、行李、待辦</b>三頁。",
+    "一行打一項，可以填「給誰」；完成後打勾，全家的畫面都會同步。",
+    "也可以直接在聊天說，AI 會自動加進清單或幫你打勾。",
+  ], ["哥哥想買皮卡丘玩偶，媽媽想買無印良品收納盒", "護照已經帶好了，幫我打勾"]],
+  ["🎫", "票券保管箱", "門票、訂位確認，沒網路也能看", [
+    "到 🧰 → 🎫 票券，輸入名稱、選照片，按「上傳」。",
+    "也可以在聊天傳照片，說「存成票券」。",
+    "要用的時候點圖片放大，給工作人員掃 QR Code。",
+    "<b>打開過一次之後，沒網路也能看</b>。建議出發前先把每張都點開一次。",
+  ], ["給我看藤子博物館的門票"]],
+  ["🗺", "家人位置地圖", "看大家在哪，走散一鍵求救", [
+    "到 🧰 → 🗺 家人位置，地圖上會顯示每個人最後的位置和住宿 🏠。",
+    "按「📍 更新我的位置」分享你現在的位置；在 ⚙️ 設定開「自動分享位置」，就會每 5 分鐘自動更新。",
+    "走散了就按「<b>🆘 我走散了</b>」，你的位置會傳到群組，全家畫面會跳出紅色提示（Android 還會震動），點一下就能看地圖。",
+    "AI 也會幫忙找好認的集合地點。",
+  ], ["大家現在在哪裡？"]],
+  ["📔", "旅遊日記", "每晚自動寫，可匯出相簿", [
+    "旅程期間每晚<b>東京時間 22:00</b>，AI 會用當天的聊天和照片寫一篇日記，發到群組。",
+    "白天多傳照片、聊聊發生了什麼事，日記就會寫得越豐富。",
+    "到 🧰 → 📔 旅遊日記 可以看每一天的日記。",
+    "按「📖 打開相簿」可以列印或存成 PDF，回國後留作紀念。",
+  ], []],
+];
+
+function renderGuidePanel(b) {
+  els.panelTitle.textContent = "📖 使用說明";
+  b.innerHTML = `
+    ${backToHub()}
+    <p class="small muted">點開每個功能看怎麼用。範例問法點一下會填進輸入框，確認後再按送出。</p>
+    ${GUIDE.map(([icon, name, tagline, steps, examples]) => `<details class="card guide">
+      <summary><span class="guide-icon">${icon}</span><span><b>${name}</b><span class="small muted">${tagline}</span></span></summary>
+      <ol>${steps.map((s) => `<li>${s}</li>`).join("")}</ol>
+      ${examples.length ? `<div class="guide-try">${examples.map((q) => `<button type="button" data-try="${escapeHtml(q)}">💬 ${escapeHtml(q)}</button>`).join("")}</div>` : ""}
+    </details>`).join("")}`;
+  bindBack(b);
+  b.querySelectorAll("[data-try]").forEach((x) =>
+    x.addEventListener("click", () => {
+      els.input.value = x.dataset.try;
+      els.input.dispatchEvent(new Event("input"));
+      els.panel.close();
+      els.input.focus();
+    }),
+  );
 }
 
 // ---------- 🗺 家人位置地圖 ----------
