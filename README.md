@@ -44,7 +44,7 @@ Durable Object「TripRoom」（SQLite）
 
 ## 部署（第一次約 5 分鐘）
 
-需要：Node.js 20 以上、Cloudflare 帳號（免費）、Gemini 與 Tavily API key。
+需要：Node.js 20 以上、Git、Cloudflare 帳號（免費）、Gemini 與 Tavily API key。Windows、Mac 都可以。
 
 ```bash
 git clone https://github.com/<你的帳號>/Tokyo-Trip-Agent.git
@@ -100,5 +100,5 @@ src/
   tools.ts       16 個工具
   trip-data.ts   住宿、航班、初始行程
 public/          前端（原生 JS、無需建置）
-scripts/setup.sh 一鍵部署
+scripts/setup.mjs 一鍵部署（Windows / Mac 通用）
 ```
