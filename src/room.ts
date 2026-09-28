@@ -991,8 +991,13 @@ ${transcript || "（今天群組沒什麼對話）"}`;
 body{font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;max-width:760px;margin:0 auto;padding:24px 16px;color:#222;line-height:1.7}
 h1{color:#c8102e}section{page-break-inside:avoid;margin-bottom:32px;border-top:2px solid #eee;padding-top:12px}
 .photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}.photos img{width:100%;border-radius:10px}
-.bar{position:sticky;top:0;background:#fff;padding:8px 0}@media print{.bar{display:none}}
-</style></head><body><div class="bar"><button onclick="print()">🖨 列印／存成 PDF</button></div>
+.bar{position:sticky;top:0;background:#fff;padding:8px 0;display:flex;gap:8px}@media print{.bar{display:none}}
+.bar button{flex:1;padding:10px;font-size:15px;border:1px solid #ddd;border-radius:10px;background:#f7f7f7;color:#222}
+</style></head><body><div class="bar"><button onclick="goBack()">← 回聊天室</button><button onclick="print()">🖨 列印／存成 PDF</button></div>
+<script>
+// 主畫面 App 模式下相簿會在同一個視窗打開、沒有返回鍵；瀏覽器另開分頁時則直接關掉分頁
+function goBack(){if(history.length>1){history.back();return}window.close();setTimeout(function(){location.href="/"},300)}
+</script>
 <h1>🗼 ${esc(TRIP.title)}</h1><p>${esc(TRIP.startDate)} – ${esc(TRIP.endDate)}</p>${body}</body></html>`;
     return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
   }
