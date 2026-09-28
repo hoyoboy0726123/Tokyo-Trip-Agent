@@ -426,7 +426,8 @@ els.sendForm.addEventListener("submit", async (e) => {
   }
 });
 
-document.querySelectorAll("#chips button").forEach((b) =>
+// 帶 data-panel 的是工具箱捷徑，由下面開面板的共用處理
+document.querySelectorAll("#chips button:not([data-panel])").forEach((b) =>
   b.addEventListener("click", () => {
     if (b.hasAttribute("data-receipt")) {
       // 先選收據照片，文字幫忙填好，確認後按送出

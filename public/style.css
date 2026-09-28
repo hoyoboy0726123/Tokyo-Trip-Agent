@@ -110,6 +110,8 @@ input, textarea, select { font: inherit; color: inherit; }
 .chips { display: flex; gap: 6px; overflow-x: auto; padding: 2px 2px 6px; scrollbar-width: none; }
 .chips::-webkit-scrollbar { display: none; }
 .chips button { flex: none; border: 1px solid var(--line); background: var(--chip); border-radius: 999px; padding: 5px 11px; font-size: 13px; }
+/* 工具箱捷徑：開頁面、不會送出訊息，用底色和問句按鈕區分 */
+.chips button.chip-panel { background: var(--red-soft); border-color: transparent; color: var(--ink); }
 .attach { display: flex; align-items: center; gap: 8px; padding: 4px 4px 8px; font-size: 13px; color: var(--muted); }
 .attach img { width: 52px; height: 52px; object-fit: cover; border-radius: 10px; }
 .attach img:not([src]) { display: none; }
