@@ -152,6 +152,20 @@ input, textarea, select { font: inherit; color: inherit; }
 .viewer::backdrop { background: rgba(0,0,0,.85); }
 .viewer img { max-width: 100vw; max-height: 100dvh; display: block; }
 
+/* ---------- 🧰 工具箱 ---------- */
+.tile-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.tile { display: grid; gap: 2px; justify-items: start; text-align: left; background: var(--card); border: 0; border-radius: 14px; padding: 14px; box-shadow: var(--shadow); }
+.tile-icon { font-size: 28px; }
+.family-map { height: 46dvh; min-height: 260px; border-radius: 14px; overflow: hidden; background: var(--line); }
+.sos-btn { background: var(--red) !important; color: #fff !important; border-color: var(--red) !important; font-weight: 700; }
+.sos-banner { background: #d00; color: #fff; text-align: center; padding: 10px; font-size: 15px; cursor: pointer; animation: pulse 1s infinite; }
+.check-item { align-items: center; }
+.check-item.done span { color: var(--muted); text-decoration: line-through; }
+.check-item input { width: 20px; height: 20px; vertical-align: middle; margin-right: 6px; }
+.doc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.doc { display: grid; gap: 4px; padding: 8px; }
+.doc img { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-radius: 10px; cursor: zoom-in; background: var(--line); }
+
 /* ---------- 中日翻譯 ---------- */
 .translator { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; padding: 0; border: 0; background: var(--bg); color: var(--ink); }
 .translator[open] { display: flex; flex-direction: column; }

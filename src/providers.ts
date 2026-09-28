@@ -165,13 +165,7 @@ export function workersAIProvider(env: Env, model?: string): Provider {
       const calls = rawCalls.map((c) => {
         const fn = c.function ?? c;
         let args = fn.arguments ?? {};
-        if (typeof args === "string") {
-          try {
-            args = JSON.parse(args);
-          } catch {
-            args = {};
-          }
-        }
+        if (typeof args === "string") args = parseArgs(args);
         return { id: c.id || `call_${crypto.randomUUID().slice(0, 8)}`, name: fn.name, args };
       });
       if (text && !calls.length) onDelta?.(text);
@@ -181,6 +175,32 @@ export function workersAIProvider(env: Env, model?: string): Provider {
 }
 
 const CHANNEL_TAG = /<\|?\/?channel\|?>/g;
+
+/** 工具參數 JSON：串流偶爾重送變成 {…}{…}，取第一個完整的物件 */
+export function parseArgs(raw: string): Record<string, unknown> {
+  if (!raw.trim()) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {}
+  let depth = 0;
+  let inStr = false;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (inStr) {
+      if (c === "\\") i++;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) {
+      try {
+        return JSON.parse(raw.slice(raw.indexOf("{"), i + 1));
+      } catch {
+        return {};
+      }
+    }
+  }
+  return {};
+}
 
 /** Gemma 偶爾把對話樣板的標記（開頭的 thought、<channel|>）混進回答，清掉 */
 function cleanModelText(s: string): string {
@@ -217,7 +237,14 @@ async function streamWorkersAI(env: Env, model: string, input: Record<string, un
   };
 
   for (;;) {
-    const { value, done } = await reader.read();
+    // 30 秒沒有新內容就放棄，讓上層改用備援模型
+    let timer: any;
+    const { value, done } = await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Workers AI 30 秒沒有回應")), 30_000);
+      }),
+    ]).finally(() => clearTimeout(timer));
     if (done) break;
     buffer += value;
     let idx: number;
@@ -239,7 +266,8 @@ async function streamWorkersAI(env: Env, model: string, input: Record<string, un
         const i = tc.index ?? calls.size;
         const cur = calls.get(i) ?? { id: undefined, name: "", args: "" };
         if (tc.id) cur.id = tc.id;
-        if (tc.function?.name) cur.name += tc.function.name;
+        // Gemma 串流有時會把工具名稱重送一次（變成 train_statustrain_status）
+        if (tc.function?.name && cur.name !== tc.function.name) cur.name += tc.function.name;
         if (tc.function?.arguments) cur.args += typeof tc.function.arguments === "string" ? tc.function.arguments : JSON.stringify(tc.function.arguments);
         calls.set(i, cur);
       }
@@ -260,13 +288,7 @@ async function streamWorkersAI(env: Env, model: string, input: Record<string, un
     .filter((c) => c.name)
     .map((c) => {
       let args: any = c.arguments ?? {};
-      if (typeof args === "string") {
-        try {
-          args = args ? JSON.parse(args) : {};
-        } catch {
-          args = {};
-        }
-      }
+      if (typeof args === "string") args = parseArgs(args);
       return { id: c.id || `call_${crypto.randomUUID().slice(0, 8)}`, name: c.name, args };
     });
   return { text: cleanModelText(text), calls: parsed };

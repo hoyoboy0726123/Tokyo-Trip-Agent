@@ -46,12 +46,13 @@
       <nav class="topbar-actions">
         <button data-panel="itinerary" title="行程">📅</button>
         <button data-panel="expenses" title="記帳">💰</button>
-        <button data-panel="memories" title="記憶">🧠</button>
+        <button data-panel="hub" title="工具箱">🧰</button>
         <button data-panel="settings" title="設定">⚙️</button>
       </nav>
     </header>
 
     <div id="conn" class="conn" hidden>連線中…</div>
+    <div id="sos-banner" class="sos-banner" hidden></div>
 
     <main id="messages" class="messages" aria-live="polite">
       <button id="load-more" class="load-more" hidden>載入更早的訊息</button>
@@ -61,6 +62,8 @@
       <div class="chips" id="chips">
         <button data-q="今天的行程和天氣？">📅 今天</button>
         <button data-q="我附近有什麼好吃的？">🍜 附近美食</button>
+        <button data-receipt>🧾 收據記帳</button>
+        <button data-q="有樂町線、山手線現在有延誤嗎？">🚆 電車狀況</button>
         <button data-q="現在日圓匯率多少？1000 日圓等於多少台幣？">💱 匯率</button>
         <button data-q="迪士尼現在哪些設施排隊最少？">🏰 迪士尼排隊</button>
         <button data-q="目前花了多少錢？大家要怎麼分？">💰 帳目</button>

@@ -51,6 +51,27 @@ export const INITIAL_ITINERARY: { date: string; title: string; detail: string; s
   { date: "2026-10-10", title: "最後採買 → 成田機場 → 返台", detail: "星宇 JX805 20:40 成田 T2 起飛", status: "回程日" },
 ];
 
+/** 預設清單（第一次啟動寫入，之後全家共用、可增刪勾選） */
+export const DEFAULT_CHECKLIST: { list: string; item: string }[] = [
+  { list: "行李", item: "護照（4 本，效期 6 個月以上）" },
+  { list: "行李", item: "Visit Japan Web 入境 QR Code 截圖" },
+  { list: "行李", item: "機票電子票證（BR198 / JX805）" },
+  { list: "行李", item: "藤子・F・不二雄博物館門票（10/4 11:00）" },
+  { list: "行李", item: "迪士尼樂園門票（10/6）" },
+  { list: "行李", item: "迪士尼海洋門票（10/9，還沒買！）" },
+  { list: "行李", item: "日圓現金" },
+  { list: "行李", item: "信用卡" },
+  { list: "行李", item: "Suica／PASMO 交通卡（或 iPhone 錢包）" },
+  { list: "行李", item: "網卡／eSIM" },
+  { list: "行李", item: "手機充電器、行動電源（放隨身行李）" },
+  { list: "行李", item: "小孩常備藥、退燒藥、OK 繃" },
+  { list: "行李", item: "折疊傘或雨衣（10 月颱風季）" },
+  { list: "行李", item: "薄外套（東京 10 月早晚約 15–20°C）" },
+  { list: "行李", item: "好走的鞋（迪士尼一天走 2 萬步）" },
+  { list: "待辦", item: "買迪士尼海洋 10/9 門票" },
+  { list: "待辦", item: "填 Visit Japan Web" },
+];
+
 /** 翻譯頁的預設常用句（第一次啟動寫入資料庫，之後全家共用、可新增刪除） */
 export const DEFAULT_PHRASES: { category: string; zh: string; ja: string; kana: string }[] = [
   // 計程車：住宿與行程上的景點

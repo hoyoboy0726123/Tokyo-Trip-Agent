@@ -13,6 +13,14 @@ export interface RoomApi {
   addExpense(e: ExpenseInput): unknown;
   deleteExpense(id: number): boolean;
   expenseSummary(): unknown;
+  checklistAdd(list: string, items: string[], forWhom: string, author: string): unknown;
+  checklistUpdate(match: { id?: number; keyword?: string; list?: string }, patch: { done?: boolean; remove?: boolean }, by: string): unknown;
+  checklistGet(list?: string): unknown;
+  reminderAdd(due: number, message: string, author: string): unknown;
+  reminderList(): unknown;
+  reminderDelete(id: number): boolean;
+  documentSave(title: string, note: string, photoId: string, author: string): unknown;
+  documentFind(keyword?: string): { id: number; title: string; note: string; photo_id: string; author: string; ts: number }[];
   cacheGet(key: string, maxAgeMs: number): string | null;
   cacheSet(key: string, value: string): void;
 }
@@ -42,6 +50,8 @@ export interface ToolContext {
   env: Env;
   room: RoomApi;
   author: string;
+  /** 發問者這則訊息附的照片（存票券、讀收據用） */
+  photoId?: string | null;
   /** 工具找到的圖片，會附在這次 AI 回答下方 */
   attachImage?: (img: AttachedImage) => void;
 }
@@ -151,7 +161,7 @@ async function geocode(place: string): Promise<{ name: string; lat: number; lon:
 
 const COORD_RE = /^\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)\s*$/;
 // 繁體字地名換成日文漢字，日本地圖資料才查得到（例如 龜有→亀有、舞濱→舞浜）
-const JA_KANJI: Record<string, string> = { 龜: "亀", 濱: "浜", 澤: "沢", 櫻: "桜", 驛: "駅", 樂: "楽", 國: "国", 廣: "広", 淺: "浅", 邊: "辺", 黑: "黒", 圓: "円", 學: "学", 藝: "芸", 橫: "横", 關: "関", 鹽: "塩", 戶: "戸" };
+const JA_KANJI: Record<string, string> = { 龜: "亀", 濱: "浜", 澤: "沢", 櫻: "桜", 驛: "駅", 樂: "楽", 國: "国", 廣: "広", 淺: "浅", 邊: "辺", 黑: "黒", 圓: "円", 學: "学", 內: "内", 藏: "蔵", 總: "総", 鐵: "鉄", 藝: "芸", 橫: "横", 關: "関", 鹽: "塩", 戶: "戸" };
 
 /** 地名或座標 → 位置。座標直接用；地名先查 OpenStreetMap（車站、公園、店名較準），再退回 Open-Meteo */
 async function locate(place: string): Promise<{ name: string; lat: number; lon: number } | null> {
@@ -824,7 +834,306 @@ export const TOOLS: Tool[] = [
       return room.updateItinerary(date, { title: args.title, detail: args.detail, status: args.status }, author);
     },
   },
+  {
+    label: "🚆 電車狀況",
+    decl: {
+      name: "train_status",
+      description: "查關東電車（JR、地鐵、私鉄）現在的運行狀況：延誤、停駛、運轉計畫。可以指定路線，例如 有楽町線、山手線、京成本線。",
+      parameters: { type: "object", properties: { line: { type: "string", description: "路線名稱（日文漢字最準），留空=列出目前所有異常路線" } } },
+    },
+    async run(args) {
+      const res = await fetch("https://transit.yahoo.co.jp/diainfo/area/4", {
+        headers: { "user-agent": "Mozilla/5.0 (compatible; TokyoTripAgent/1.0)" },
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (!res.ok) return { error: `運行情報暫時查不到（${res.status}）` };
+      const html = await res.text();
+      const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+      if (!m) return { error: "運行情報格式改了，暫時無法解析" };
+      const page = JSON.parse(m[1])?.props?.pageProps ?? {};
+      const flat = (x: any): any[] => (Array.isArray(x) ? x.flatMap(flat) : x && typeof x === "object" && !x.routeInfo ? Object.values(x).flatMap(flat) : x ? [x] : []);
+      const lines = flat(page.diainfoTrainFeatures ?? [])
+        .map((x: any) => x?.routeInfo?.property)
+        .filter((p: any) => p?.displayName)
+        .map((p: any) => ({
+          line: p.displayName as string,
+          company: p.companyName as string,
+          issues: (p.diainfo ?? []).map((d: any) => ({ status: d.status, message: d.message, updated: d.updateDate })),
+        }));
+      const want = String(args.line ?? "").trim();
+      if (want) {
+        const ja = [...want.replace("丸之內", "丸ノ内")].map((c) => JA_KANJI[c] ?? c).join("").replace(/線$/, "");
+        const hits = lines.filter((l: any) => l.line.includes(ja) || ja.includes(l.line.replace(/線$/, "")));
+        if (!hits.length) return { line: want, note: "沒有找到這條路線，可能名稱不同；目前異常路線如下", troubles: lines.filter((l: any) => l.issues.length).slice(0, 15) };
+        return { results: hits.map((h: any) => ({ ...h, status: h.issues.length ? h.issues.map((i: any) => i.status).join("、") : "平常運轉" })), source: "Yahoo!路線情報" };
+      }
+      const troubles = lines.filter((l: any) => l.issues.length);
+      return { troubles: troubles.slice(0, 20), normal_count: lines.length - troubles.length, source: "Yahoo!路線情報" };
+    },
+  },
+  {
+    label: "🚕 計程車估價",
+    decl: {
+      name: "taxi_fare",
+      description: "估算東京計程車車資與車程（依實際行車距離與東京 23 區計費）。起點留空=發問者目前位置或住宿。",
+      parameters: {
+        type: "object",
+        properties: {
+          from: { type: "string", description: "起點（日文地名或座標），留空=目前位置或住宿" },
+          to: { type: "string", description: "目的地，例如 東京ディズニーシー、成田空港第2ターミナル" },
+          night: { type: "boolean", description: "是否深夜（22:00–05:00 加成 20%），留空=依現在時間判斷" },
+        },
+        required: ["to"],
+      },
+    },
+    async run(args, { room, author }) {
+      let from: { name: string; lat: number; lon: number } | null = null;
+      if (args.from) from = await locate(String(args.from));
+      if (!from) {
+        const mine = recentLocation(room, author);
+        from = mine ? { name: mine.area || "目前位置", lat: mine.lat, lon: mine.lon } : { name: "住宿（要町）", lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon };
+      }
+      const to = await locate(String(args.to));
+      if (!to) return { error: `找不到「${args.to}」，請用日文地名再試` };
+      const d = await getJSON(`https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}?overview=false`, undefined, 12_000);
+      const route = d.routes?.[0];
+      if (!route) return { error: "算不出行車路線" };
+      const km = route.distance / 1000;
+      const minutes = Math.round(route.duration / 60);
+      // 東京 23 區（2022 起）：1.096 km 內 500 圓，之後每 255 m 加 100 圓；另估塞車時間計費約多 10–25%
+      const meter = (m: number) => 500 + Math.max(0, Math.ceil((m - 1096) / 255)) * 100;
+      const jstHour = new Date(Date.now() + 9 * 3600_000).getUTCHours();
+      const night = typeof args.night === "boolean" ? args.night : jstHour >= 22 || jstHour < 5;
+      const base = meter(night ? route.distance * 1.25 : route.distance); // 深夜 20% 加成＝以 1.25 倍距離計算
+      const low = Math.round(base / 100) * 100;
+      const high = Math.round((base * 1.25) / 100) * 100;
+      return {
+        from: from.name,
+        to: to.name,
+        distance_km: Math.round(km * 10) / 10,
+        drive_minutes: `${minutes}–${Math.round(minutes * 1.5)} 分鐘（視路況）`,
+        fare_jpy: `約 ¥${low.toLocaleString()}–¥${high.toLocaleString()}`,
+        night_surcharge: night,
+        notes: "估算值，不含高速公路過路費與叫車費（用 GO 等 App 叫車約多 ¥0–500）。4 人＋行李建議叫大一點的車（ジャンボタクシー）。可以先把目的地的日文給司機看。",
+        source: "路線：OSRM（OpenStreetMap）；費率：東京 23 區",
+      };
+    },
+  },
+  {
+    label: "🆘 災害警報",
+    decl: {
+      name: "japan_alerts",
+      description: "查日本的地震、海嘯、颱風與東京附近的強風豪雨預報。問「有地震嗎」「颱風會不會影響行程」時使用。",
+      parameters: { type: "object", properties: {} },
+    },
+    async run() {
+      return japanAlerts();
+    },
+  },
+  {
+    label: "✅ 清單",
+    decl: {
+      name: "add_checklist_items",
+      description: "把東西加進全家共用清單：購物清單（想買的東西）、行李清單、待辦事項。例如「哥哥想買皮卡丘玩偶」→ 購物。",
+      parameters: {
+        type: "object",
+        properties: {
+          list: { type: "string", enum: ["購物", "行李", "待辦"] },
+          items: { type: "array", items: { type: "string" }, description: "要加入的項目，每項一句" },
+          for_whom: { type: "string", description: "是誰要的（購物用），可留空" },
+        },
+        required: ["list", "items"],
+      },
+    },
+    async run(args, { room, author }) {
+      const items = (Array.isArray(args.items) ? args.items : [args.items]).map((s: unknown) => String(s ?? "").trim()).filter(Boolean).slice(0, 20);
+      if (!items.length) return { error: "沒有要加入的項目" };
+      return room.checklistAdd(String(args.list || "購物"), items, String(args.for_whom ?? ""), author);
+    },
+  },
+  {
+    label: "✅ 清單",
+    decl: {
+      name: "update_checklist_item",
+      description: "清單項目打勾（買到了、帶了、辦好了）、取消勾選或刪除。用關鍵字或 id 指定。",
+      parameters: {
+        type: "object",
+        properties: {
+          keyword: { type: "string", description: "項目關鍵字，例如 皮卡丘" },
+          id: { type: "integer" },
+          list: { type: "string", enum: ["購物", "行李", "待辦"] },
+          done: { type: "boolean", description: "true=打勾，false=取消勾選" },
+          remove: { type: "boolean", description: "true=刪除" },
+        },
+      },
+    },
+    async run(args, { room, author }) {
+      return room.checklistUpdate(
+        { id: args.id ? Number(args.id) : undefined, keyword: args.keyword, list: args.list },
+        { done: typeof args.done === "boolean" ? args.done : args.remove ? undefined : true, remove: !!args.remove },
+        author,
+      );
+    },
+  },
+  {
+    label: "✅ 清單",
+    decl: {
+      name: "get_checklist",
+      description: "查看全家共用清單（購物、行李、待辦），包含哪些已完成、哪些還沒。",
+      parameters: { type: "object", properties: { list: { type: "string", enum: ["購物", "行李", "待辦"] } } },
+    },
+    async run(args, { room }) {
+      return room.checklistGet(args.list);
+    },
+  },
+  {
+    label: "⏰ 提醒",
+    decl: {
+      name: "create_reminder",
+      description: "設定提醒，時間到了會在群組發訊息通知全家。例如「10/4 早上 9:30 提醒大家出門去藤子博物館」。",
+      parameters: {
+        type: "object",
+        properties: {
+          time: { type: "string", description: "東京時間，格式 YYYY-MM-DD HH:mm，例如 2026-10-04 09:30" },
+          message: { type: "string", description: "提醒內容" },
+        },
+        required: ["time", "message"],
+      },
+    },
+    async run(args, { room, author }) {
+      const m = String(args.time ?? "").match(/(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})/);
+      if (!m) return { error: "時間格式看不懂，請用 2026-10-04 09:30（東京時間）" };
+      const due = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 9, +m[5]);
+      if (due < Date.now() - 60_000) return { error: "這個時間已經過了" };
+      return room.reminderAdd(due, String(args.message).slice(0, 300), author);
+    },
+  },
+  {
+    label: "⏰ 提醒",
+    decl: {
+      name: "list_reminders",
+      description: "列出還沒到的提醒。",
+      parameters: { type: "object", properties: {} },
+    },
+    async run(_args, { room }) {
+      return room.reminderList();
+    },
+  },
+  {
+    label: "⏰ 提醒",
+    decl: {
+      name: "delete_reminder",
+      description: "刪除一個提醒（用 list_reminders 的 id）。",
+      parameters: { type: "object", properties: { id: { type: "integer" } }, required: ["id"] },
+    },
+    async run(args, { room }) {
+      return { deleted: room.reminderDelete(Number(args.id)) };
+    },
+  },
+  {
+    label: "🎫 票券",
+    decl: {
+      name: "save_document",
+      description: "把成員這則訊息附的照片存進票券保管箱（門票、訂位確認、QR Code、登機證、保險單等），之後可以快速叫出來，沒網路也看得到。",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "名稱，例如「藤子博物館門票 10/4 11:00」" },
+          note: { type: "string", description: "補充說明，可留空" },
+        },
+        required: ["title"],
+      },
+    },
+    async run(args, { room, author, photoId }) {
+      if (!photoId) return { error: "這則訊息沒有附照片，請附上票券照片再說要存起來" };
+      return room.documentSave(String(args.title).slice(0, 80), String(args.note ?? "").slice(0, 300), photoId, author);
+    },
+  },
+  {
+    label: "🎫 票券",
+    decl: {
+      name: "find_documents",
+      description: "從票券保管箱找出票券或憑證，照片會顯示在回答下方。例如「給我看藤子博物館的票」。",
+      parameters: { type: "object", properties: { keyword: { type: "string", description: "關鍵字，留空=全部" } } },
+    },
+    async run(args, { room, attachImage }) {
+      const docs = room.documentFind(args.keyword);
+      for (const d of docs.slice(0, 6)) attachImage?.({ src: `/api/photo/${d.photo_id}`, caption: d.note, label: d.title, source: `${d.author} 存的` });
+      if (!docs.length) return { found: 0, note: "保管箱裡沒有符合的票券；可以在 🧰 工具箱 → 🎫 票券 上傳，或傳照片並說「存成票券」" };
+      return { found: docs.length, documents: docs.map((d) => ({ id: d.id, title: d.title, note: d.note, by: d.author })), note: "票券照片已顯示在回答下方" };
+    },
+  },
 ];
+
+// ---------------- 災害警報（地震、海嘯、颱風、強風豪雨） ----------------
+
+const KANTO = ["東京都", "千葉県", "神奈川県", "埼玉県"];
+export const SCALE_TEXT: Record<number, string> = { 10: "1", 20: "2", 30: "3", 40: "4", 45: "5弱", 50: "5強", 55: "6弱", 60: "6強", 70: "7" };
+
+export async function japanAlerts() {
+  const out: Record<string, unknown> = {};
+  await Promise.all([
+    (async () => {
+      try {
+        const list = await getJSON("https://api.p2pquake.net/v2/history?codes=551&codes=552&limit=20", undefined, 10_000);
+        const since = Date.now() - 48 * 3600_000;
+        out.earthquakes = (list as any[])
+          .filter((e) => e.code === 551)
+          .map((e) => {
+            const kanto = (e.points ?? []).filter((p: any) => KANTO.includes(p.pref));
+            const tokyoMax = kanto.reduce((mx: number, p: any) => Math.max(mx, p.scale ?? 0), 0);
+            return {
+              id: e.id,
+              time: e.earthquake?.time,
+              place: e.earthquake?.hypocenter?.name,
+              magnitude: e.earthquake?.hypocenter?.magnitude,
+              max_intensity: SCALE_TEXT[e.earthquake?.maxScale] ?? "不明",
+              kanto_max_intensity: tokyoMax ? SCALE_TEXT[tokyoMax] : null,
+              tsunami: e.earthquake?.domesticTsunami,
+            };
+          })
+          .filter((e) => Date.parse(String(e.time).replace(/\//g, "-") + "+09:00") > since)
+          .slice(0, 8);
+        out.tsunami = (list as any[]).filter((e) => e.code === 552 && !e.cancelled).slice(0, 3).map((e) => ({ time: e.time, areas: (e.areas ?? []).map((a: any) => `${a.name}（${a.grade}）`) }));
+      } catch {
+        out.earthquakes = "暫時查不到";
+      }
+    })(),
+    (async () => {
+      try {
+        const tcs = await getJSON("https://www.jma.go.jp/bosai/typhoon/data/targetTc.json", undefined, 10_000);
+        out.typhoons = (tcs as any[]).map((t) => ({ number: t.typhoonNumber ? `第 ${Number(String(t.typhoonNumber).slice(2))} 號` : t.tropicalCyclone, category: t.category, issued: t.issue }));
+      } catch {
+        out.typhoons = "暫時查不到";
+      }
+    })(),
+    (async () => {
+      try {
+        const w = await getJSON("https://www.jma.go.jp/bosai/warning/data/warning/130000.json", undefined, 10_000);
+        out.tokyo_warning_headline = w.headlineText || "目前沒有特別提醒";
+      } catch {}
+    })(),
+    (async () => {
+      try {
+        const f = await getJSON(
+          `https://api.open-meteo.com/v1/forecast?latitude=${TRIP.accommodation.lat}&longitude=${TRIP.accommodation.lon}&timezone=Asia%2FTokyo&forecast_days=3&daily=precipitation_sum,wind_gusts_10m_max,weather_code`,
+          undefined,
+          10_000,
+        );
+        out.tokyo_forecast = (f.daily?.time ?? []).map((date: string, i: number) => ({
+          date,
+          rain_mm: f.daily.precipitation_sum[i],
+          max_gust_kmh: f.daily.wind_gusts_10m_max[i],
+          weather: WEATHER[f.daily.weather_code[i]] ?? f.daily.weather_code[i],
+          severe: f.daily.wind_gusts_10m_max[i] >= 60 || f.daily.precipitation_sum[i] >= 30 || f.daily.weather_code[i] >= 95,
+        }));
+      } catch {}
+    })(),
+  ]);
+  out.emergency = "緊急電話：警察 110、救護車／消防 119；日本觀光局 24 小時多語熱線 050-3816-2787（有中文）";
+  out.source = "P2P地震情報、日本氣象廳、Open-Meteo";
+  return out;
+}
 
 export const TOOL_DECLS = TOOLS.map((t) => t.decl);
 

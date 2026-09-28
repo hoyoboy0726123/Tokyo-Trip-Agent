@@ -38,7 +38,24 @@ function md(text) {
 // ================= 登入 =================
 
 async function checkSession() {
-  const res = await fetch("/api/me");
+  let res;
+  try {
+    res = await fetch("/api/me");
+  } catch {
+    // 沒網路：用上次登入的名字進入離線模式（常用句、票券還能用）
+    const name = localStorage.getItem("tta-name");
+    if (name) {
+      S.me = { name, admin: false };
+      S.offline = true;
+      els.app.hidden = false;
+      els.conn.hidden = false;
+      els.conn.textContent = "📴 離線中：常用句（🇯🇵）與票券（🧰）仍可使用";
+      setTimeout(connect, 5000);
+      return;
+    }
+    els.login.hidden = false;
+    return;
+  }
   if (res.ok) {
     S.me = (await res.json()).user;
     startApp();
@@ -96,8 +113,10 @@ function connect() {
     els.conn.textContent = "連線中斷，重新連線中…";
     const delay = Math.min(1000 * 2 ** S.retry++, 15000);
     setTimeout(async () => {
-      const me = await fetch("/api/me");
-      if (me.status === 401) return location.reload();
+      try {
+        const me = await fetch("/api/me");
+        if (me.status === 401) return location.reload();
+      } catch {}
       connect();
     }, delay);
   };
@@ -135,6 +154,7 @@ function handle(m) {
     case "message":
       appendMessage(m.message);
       scrollToBottom(m.message.author === S.me.name);
+      if (m.message.role === "user" && m.message.text.startsWith("🆘") && m.message.author !== S.me.name) showSos(m.message);
       break;
     case "older":
       prependMessages(m.messages);
@@ -212,7 +232,8 @@ function messageNode(msg) {
     body += `<div class="loc-card">📍 <a href="${url}" target="_blank" rel="noopener">分享了目前位置</a></div>`;
   }
   if (msg.text) body += isAI ? md(msg.text) : escapeHtml(msg.text).replace(/\n/g, "<br>");
-  const images = (msg.meta?.images ?? []).filter((im) => typeof im.src === "string" && im.src.startsWith("/api/img?"));
+  const images = (msg.meta?.images ?? []).filter((im) => typeof im.src === "string" && (im.src.startsWith("/api/img?") || im.src.startsWith("/api/photo/")));
+  const webImages = images.some((im) => im.src.startsWith("/api/img?"));
   if (images.length) {
     body += `<div class="gallery">${images
       .map((im) => {
@@ -222,7 +243,7 @@ function messageNode(msg) {
           <figcaption>${im.label ? `<b>${escapeHtml(im.label)}</b><br>` : ""}${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(im.source)}</a>` : escapeHtml(im.source)}</figcaption>
         </figure>`;
       })
-      .join("")}</div><div class="small muted">🖼 網路圖片，僅供參考</div>`;
+      .join("")}</div>${webImages ? `<div class="small muted">🖼 網路圖片，僅供參考</div>` : ""}`;
   }
   const tools = msg.meta?.tools?.length ? msg.meta.tools.map((t) => `<span class="tool-chip">${escapeHtml(t)}</span>`).join("") : "";
   const provider = isAI && msg.meta?.provider ? (msg.meta.provider === "gemini" ? "Gemini" : "Workers AI") : "";
@@ -398,6 +419,12 @@ els.sendForm.addEventListener("submit", async (e) => {
 
 document.querySelectorAll("#chips button").forEach((b) =>
   b.addEventListener("click", () => {
+    if (b.hasAttribute("data-receipt")) {
+      // 先選收據照片，文字幫忙填好，確認後按送出
+      els.input.value = "幫我把這張收據記帳（我付的）";
+      els.photoInput.click();
+      return;
+    }
     els.input.value = b.dataset.q;
     if (b.dataset.q.includes("附近") || b.dataset.q.includes("回住宿")) attachLocation(true);
     else els.sendForm.requestSubmit();
@@ -509,6 +536,11 @@ function stopAutoLocation() {
 function setState(state) {
   S.state = state;
   // 常用句存一份在手機，沒網路也能打開、念出來
+  if (state.documents) {
+    try {
+      localStorage.setItem("tta-docs", JSON.stringify(state.documents));
+    } catch {}
+  }
   if (state.phrases) {
     try {
       localStorage.setItem("tta-phrases", JSON.stringify(state.phrases));
@@ -567,7 +599,14 @@ function action(payload) {
 function renderPanel() {
   const st = S.state;
   const b = els.panelBody;
-  if (!st) return;
+  if (!st) {
+    // 離線時只有工具箱與票券能用（票券照片有快取）
+    if (S.panel === "hub" || S.panel === "tickets") return renderToolPanel(null, b);
+    els.panelTitle.textContent = "📴 離線中";
+    b.innerHTML = `<div class="card small muted">目前沒有網路，這個功能暫時不能用。常用句（🇯🇵）和票券（🧰 → 🎫）離線也能看。</div>`;
+    return;
+  }
+  if (["hub", "map", "checklist", "tickets", "reminders", "diary"].includes(S.panel)) return renderToolPanel(st, b);
   switch (S.panel) {
     case "itinerary": {
       els.panelTitle.textContent = "📅 行程";
@@ -704,6 +743,14 @@ function renderPanel() {
           <div class="small muted" style="margin-top:10px">旅伴名單（記帳預設平分對象，用逗號分隔）</div>
           <form class="row" id="travelers-form"><input name="t" value="${escapeHtml(s.travelers || "")}" placeholder="爸爸, 媽媽, 哥哥, 妹妹" style="flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--card)" /><button class="btn primary-sm">儲存</button></form>
           <p class="small muted" style="margin-top:10px">所有聊天紀錄都會永久保存，AI 會自動回想以前聊過的內容。</p>
+          <div class="small muted" style="margin-top:10px">自動通知（旅程期間，東京時間）</div>
+          <label class="row between small"><span>☀️ 每天 07:00 早報</span><input type="checkbox" data-auto="autoBrief" ${s.autoBrief ? "checked" : ""} /></label>
+          <label class="row between small"><span>📔 每天 22:00 旅遊日記</span><input type="checkbox" data-auto="autoDiary" ${s.autoDiary ? "checked" : ""} /></label>
+          <label class="row between small"><span>🆘 地震、颱風、強風豪雨通知</span><input type="checkbox" data-auto="autoAlerts" ${s.autoAlerts ? "checked" : ""} /></label>
+          <div class="row" style="gap:6px;margin-top:6px">
+            <button class="btn small" id="brief-now">現在發一次早報</button>
+            <button class="btn small" id="diary-now">現在寫今天的日記</button>
+          </div>
         </div>
         <div class="card"><h3>🧹 清除資料</h3>
           <p class="small muted">測試結束、正式使用前，或換一趟新行程時使用。只會清除勾選的項目，<b>清除後無法復原</b>。</p>
@@ -713,6 +760,7 @@ function renderPanel() {
               <label><input type="checkbox" name="memory" /> 長期記憶與摘要</label>
               <label><input type="checkbox" name="expenses" /> 帳目</label>
               <label><input type="checkbox" name="itinerary" /> 行程還原成預設</label>
+              <label><input type="checkbox" name="tools" /> 清單、提醒、票券、日記</label>
             </div>
             <button class="btn danger">清除勾選的資料</button>
           </form>
@@ -731,10 +779,21 @@ function renderPanel() {
         e.preventDefault();
         action({ action: "settings", travelers: new FormData(e.target).get("t") });
       });
+      b.querySelectorAll("[data-auto]").forEach((x) => x.addEventListener("change", () => action({ action: "settings", [x.dataset.auto]: x.checked })));
+      b.querySelector("#brief-now")?.addEventListener("click", (e) => {
+        e.target.textContent = "產生中…";
+        action({ action: "brief_now" });
+        els.panel.close();
+      });
+      b.querySelector("#diary-now")?.addEventListener("click", (e) => {
+        e.target.textContent = "產生中…";
+        action({ action: "diary_now" });
+        els.panel.close();
+      });
       b.querySelector("#reset-form")?.addEventListener("submit", (e) => {
         e.preventDefault();
         const f = new FormData(e.target);
-        const names = { chat: "聊天紀錄", memory: "長期記憶與摘要", expenses: "帳目", itinerary: "行程（還原成預設）" };
+        const names = { chat: "聊天紀錄", memory: "長期記憶與摘要", expenses: "帳目", itinerary: "行程（還原成預設）", tools: "清單、提醒、票券、日記" };
         const picked = Object.keys(names).filter((k) => f.get(k));
         if (!picked.length) return alert("請至少勾選一項");
         const typed = prompt(`即將清除：${picked.map((k) => names[k]).join("、")}\n所有人的資料都會被清除，無法復原。\n\n確定的話請輸入「清除」`);
@@ -745,6 +804,293 @@ function renderPanel() {
       break;
     }
   }
+}
+
+// ================= 🧰 工具箱 =================
+
+const TOOL_TILES = [
+  ["map", "🗺", "家人位置", "看大家在哪、走散求救"],
+  ["checklist", "✅", "清單", "購物、行李、待辦"],
+  ["tickets", "🎫", "票券", "門票、訂位憑證，離線可看"],
+  ["reminders", "⏰", "提醒", "時間到在群組通知"],
+  ["diary", "📔", "旅遊日記", "每晚自動寫、匯出相簿"],
+  ["memories", "🧠", "長期記憶", "AI 記得的事"],
+];
+
+function renderToolPanel(st, b) {
+  switch (S.panel) {
+    case "hub": {
+      els.panelTitle.textContent = "🧰 工具箱";
+      b.innerHTML = `<div class="tile-grid">${TOOL_TILES.map(
+        ([id, icon, name, desc]) => `<button class="tile" data-go="${id}"><span class="tile-icon">${icon}</span><b>${name}</b><span class="small muted">${desc}</span></button>`,
+      ).join("")}</div>`;
+      b.querySelectorAll("[data-go]").forEach((x) => x.addEventListener("click", () => openPanel(x.dataset.go)));
+      break;
+    }
+    case "map":
+      renderMapPanel(st, b);
+      break;
+    case "checklist":
+      renderChecklistPanel(st, b);
+      break;
+    case "tickets":
+      renderTicketsPanel(st, b);
+      break;
+    case "reminders":
+      renderRemindersPanel(st, b);
+      break;
+    case "diary":
+      renderDiaryPanel(st, b);
+      break;
+  }
+}
+
+const backToHub = () => `<button class="btn small" data-go-hub>← 工具箱</button>`;
+function bindBack(b) {
+  b.querySelector("[data-go-hub]")?.addEventListener("click", () => openPanel("hub"));
+}
+
+// ---------- 🗺 家人位置地圖 ----------
+
+let leafletLoading = null;
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  if (leafletLoading) return leafletLoading;
+  leafletLoading = new Promise((resolve, reject) => {
+    const css = document.createElement("link");
+    css.rel = "stylesheet";
+    css.href = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css";
+    document.head.appendChild(css);
+    const js = document.createElement("script");
+    js.src = "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js";
+    js.onload = resolve;
+    js.onerror = () => {
+      leafletLoading = null;
+      reject(new Error("地圖載入失敗"));
+    };
+    document.head.appendChild(js);
+  });
+  return leafletLoading;
+}
+
+let leafletMap = null;
+function renderMapPanel(st, b) {
+  els.panelTitle.textContent = "🗺 家人位置";
+  const locs = st.locations ?? [];
+  b.innerHTML = `
+    ${backToHub()}
+    <div id="family-map" class="family-map"></div>
+    <div class="list card">
+      ${locs.length
+        ? locs.map((l) => `<div class="item small"><span><b>${escapeHtml(l.name)}</b>　${escapeHtml(l.area || "")}</span><span class="muted">${Math.max(0, Math.round((Date.now() - l.ts) / 60000))} 分鐘前</span></div>`).join("")
+        : `<div class="small muted">還沒有人分享位置。按下面的按鈕分享，或在 ⚙️ 設定開啟「自動分享位置」。</div>`}
+    </div>
+    <div class="row" style="gap:8px">
+      <button class="btn" id="map-share" style="flex:1">📍 更新我的位置</button>
+      <button class="btn danger sos-btn" id="map-sos" style="flex:1">🆘 我走散了</button>
+    </div>
+    <p class="small muted">按「🆘 我走散了」會把你的位置傳到群組，全家手機都會震動提醒，AI 也會幫忙安排集合地點。</p>`;
+  bindBack(b);
+  $("#map-share").addEventListener("click", async () => {
+    try {
+      const p = await getPosition();
+      wsSend({ type: "location", ...p });
+      setTimeout(() => wsSend({ type: "get_state" }), 2500);
+      $("#map-share").textContent = "✅ 已更新";
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+  $("#map-sos").addEventListener("click", async () => {
+    if (!confirm("確定要通知全家你走散了嗎？")) return;
+    let loc = null;
+    try {
+      loc = await getPosition();
+    } catch {}
+    wsSend({ type: "send", text: "🆘 我跟大家走散了，請幫忙！", location: loc });
+    els.panel.close();
+  });
+  loadLeaflet()
+    .then(() => {
+      const el = $("#family-map");
+      if (!el || !window.L) return;
+      leafletMap?.remove();
+      const acc = st.trip?.accommodationCoords;
+      const points = locs.map((l) => [l.lat, l.lon]);
+      leafletMap = L.map(el, { zoomControl: true }).setView(points[0] ?? [35.7345, 139.6925], 15);
+      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(leafletMap);
+      locs.forEach((l) => {
+        L.circleMarker([l.lat, l.lon], { radius: 10, color: "#fff", weight: 3, fillColor: colorFor(l.name), fillOpacity: 1 })
+          .addTo(leafletMap)
+          .bindTooltip(`${l.name}（${Math.round((Date.now() - l.ts) / 60000)} 分鐘前）`, { permanent: true, direction: "top" });
+      });
+      if (acc) L.marker([acc.lat, acc.lon]).addTo(leafletMap).bindTooltip("🏠 住宿");
+      if (points.length > 1) leafletMap.fitBounds(points, { padding: [40, 40] });
+      setTimeout(() => leafletMap?.invalidateSize(), 200);
+    })
+    .catch(() => {
+      const el = $("#family-map");
+      if (el) el.innerHTML = `<div class="small muted" style="padding:16px">地圖載入失敗，請確認網路</div>`;
+    });
+}
+
+function showSos(msg) {
+  navigator.vibrate?.([300, 150, 300, 150, 600]);
+  const banner = $("#sos-banner");
+  banner.innerHTML = `🆘 <b>${escapeHtml(msg.author)}</b> 走散了！點這裡看位置`;
+  banner.hidden = false;
+  banner.onclick = () => {
+    banner.hidden = true;
+    wsSend({ type: "get_state" });
+    openPanel("map");
+  };
+  setTimeout(() => (banner.hidden = true), 60_000);
+}
+
+// ---------- ✅ 清單 ----------
+
+let checklistTab = "購物";
+function renderChecklistPanel(st, b) {
+  els.panelTitle.textContent = "✅ 清單";
+  const all = st.checklist ?? [];
+  const items = all.filter((c) => c.list === checklistTab);
+  const left = items.filter((c) => !c.done).length;
+  b.innerHTML = `
+    ${backToHub()}
+    <div class="tr-dir">${["購物", "行李", "待辦"].map((t) => `<button data-tab="${t}" class="${t === checklistTab ? "active" : ""}">${t}（${all.filter((c) => c.list === t && !c.done).length}）</button>`).join("")}</div>
+    <div class="card"><div class="list">
+      ${items.length
+        ? items.map((c) => `<label class="item check-item ${c.done ? "done" : ""}">
+            <span><input type="checkbox" data-id="${c.id}" ${c.done ? "checked" : ""} /> ${escapeHtml(c.item)}${c.for ? ` <span class="tag">${escapeHtml(c.for)}</span>` : ""}${c.done_by ? `<span class="small muted">（${escapeHtml(c.done_by)} ✓）</span>` : ""}</span>
+            <button class="btn danger small" data-del="${c.id}" type="button">✕</button></label>`).join("")
+        : `<div class="small muted">還沒有項目</div>`}
+    </div><div class="small muted" style="margin-top:6px">剩 ${left} 項。也可以在聊天說「哥哥想買皮卡丘玩偶」「護照帶了」，AI 會自動更新。</div></div>
+    <div class="card"><form class="form" id="ck-form">
+      <textarea name="item" rows="2" placeholder="一行一項，例如：&#10;皮卡丘玩偶&#10;無印良品收納盒" required></textarea>
+      <div class="row"><input name="forWhom" placeholder="給誰（可留空）" style="flex:1" /><button class="btn primary-sm">加入${checklistTab}</button></div>
+    </form></div>`;
+  bindBack(b);
+  b.querySelectorAll("[data-tab]").forEach((x) =>
+    x.addEventListener("click", () => {
+      checklistTab = x.dataset.tab;
+      renderPanel();
+    }),
+  );
+  b.querySelectorAll("input[type=checkbox][data-id]").forEach((x) => x.addEventListener("change", () => action({ action: "checklist_toggle", id: Number(x.dataset.id), done: x.checked })));
+  b.querySelectorAll("[data-del]").forEach((x) => x.addEventListener("click", () => confirm("刪除這一項？") && action({ action: "checklist_delete", id: Number(x.dataset.del) })));
+  b.querySelector("#ck-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    action({ action: "checklist_add", list: checklistTab, item: f.get("item"), forWhom: f.get("forWhom") });
+  });
+}
+
+// ---------- 🎫 票券保管箱 ----------
+
+function renderTicketsPanel(st, b) {
+  els.panelTitle.textContent = "🎫 票券保管箱";
+  let docs = st?.documents;
+  if (!docs) {
+    try {
+      docs = JSON.parse(localStorage.getItem("tta-docs") || "[]");
+    } catch {
+      docs = [];
+    }
+  }
+  b.innerHTML = `
+    ${backToHub()}
+    <p class="small muted">門票、訂位確認、QR Code 存在這裡，全家都看得到；<b>打開過一次之後，沒網路也能看</b>。也可以在聊天傳照片說「存成票券」。</p>
+    ${st ? `<div class="card"><form class="form" id="doc-form">
+      <input name="title" placeholder="名稱，例如：藤子博物館門票 10/4 11:00" required />
+      <input name="note" placeholder="備註（可留空）" />
+      <input name="photo" type="file" accept="image/*" required />
+      <button class="btn primary-sm" id="doc-save">上傳</button>
+    </form></div>` : ""}
+    <div class="doc-grid">${docs.length
+      ? docs.map((d) => `<div class="card doc" data-src="${escapeHtml(d.photo)}">
+          <img src="${escapeHtml(d.photo)}" loading="lazy" alt="" />
+          <b>${escapeHtml(d.title)}</b>${d.note ? `<div class="small muted">${escapeHtml(d.note)}</div>` : ""}
+          <div class="row between small muted"><span>${escapeHtml(d.author)}</span>${st ? `<button class="btn danger small" data-del="${d.id}">刪除</button>` : ""}</div>
+        </div>`).join("")
+      : `<div class="card small muted">還沒有票券</div>`}</div>`;
+  bindBack(b);
+  // 預先載入所有票券照片，讓離線快取有東西可看
+  docs.forEach((d) => fetch(d.photo).catch(() => {}));
+  b.querySelectorAll(".doc img").forEach((img) => img.addEventListener("click", () => openViewer(img.src)));
+  b.querySelectorAll("[data-del]").forEach((x) => x.addEventListener("click", () => confirm("刪除這張票券？") && action({ action: "document_delete", id: Number(x.dataset.del) })));
+  b.querySelector("#doc-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const file = f.get("photo");
+    if (!file || !file.size) return;
+    const btn = $("#doc-save");
+    btn.disabled = true;
+    btn.textContent = "上傳中…";
+    try {
+      const blob = await resizeImage(file, 1600, 0.88);
+      const res = await fetch("/api/photo", { method: "POST", headers: { "content-type": blob.type }, body: blob });
+      if (!res.ok) throw new Error(`上傳失敗（${res.status}）`);
+      const { id } = await res.json();
+      action({ action: "document_save", title: f.get("title"), note: f.get("note"), photoId: id });
+    } catch (err) {
+      alert(err.message);
+      btn.disabled = false;
+      btn.textContent = "上傳";
+    }
+  });
+}
+
+// ---------- ⏰ 提醒 ----------
+
+function renderRemindersPanel(st, b) {
+  els.panelTitle.textContent = "⏰ 提醒";
+  const rs = st.reminders ?? [];
+  b.innerHTML = `
+    ${backToHub()}
+    <p class="small muted">時間到了會在群組發訊息通知全家（東京時間）。也可以在聊天說「10/4 早上 9:30 提醒大家出門」。</p>
+    <div class="card"><div class="list">
+      ${rs.length
+        ? rs.map((r) => `<div class="item small"><div><b>${escapeHtml(r.time)}</b><div>${escapeHtml(r.message)}</div><div class="muted">${escapeHtml(r.by)}</div></div><button class="btn danger small" data-del="${r.id}">刪除</button></div>`).join("")
+        : `<div class="small muted">沒有待發的提醒</div>`}
+    </div></div>
+    <div class="card"><form class="form" id="rm-form">
+      <label class="small muted">日期時間（東京時間）<input name="at" type="datetime-local" required /></label>
+      <input name="message" placeholder="提醒內容，例如：出門去藤子博物館！" required />
+      <button class="btn primary-sm">新增提醒</button>
+    </form></div>`;
+  bindBack(b);
+  b.querySelectorAll("[data-del]").forEach((x) => x.addEventListener("click", () => action({ action: "reminder_delete", id: Number(x.dataset.del) })));
+  b.querySelector("#rm-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const m = String(f.get("at")).match(/(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+    if (!m) return;
+    // 輸入的是東京時間，換成 UTC 毫秒
+    const due = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 9, +m[5]);
+    action({ action: "reminder_add", due, message: f.get("message") });
+  });
+}
+
+// ---------- 📔 旅遊日記 ----------
+
+function renderDiaryPanel(st, b) {
+  els.panelTitle.textContent = "📔 旅遊日記";
+  const ds = st.diaries ?? [];
+  b.innerHTML = `
+    ${backToHub()}
+    <p class="small muted">旅途中每晚 22:00（東京時間）AI 會用當天的對話和照片寫一篇日記。</p>
+    <a class="btn primary-sm" href="/api/album" target="_blank" rel="noopener" style="display:block;text-align:center;text-decoration:none">📖 打開相簿（可列印／存成 PDF）</a>
+    ${ds.length
+      ? ds.map((d) => {
+          const photos = JSON.parse(d.photo_ids || "[]");
+          return `<div class="card"><h3>${escapeHtml(String(d.date).slice(5).replace("-", "/"))}</h3>
+            <div class="small" style="white-space:pre-wrap">${escapeHtml(d.text)}</div>
+            ${photos.length ? `<div class="gallery">${photos.map((p) => `<figure><img class="photo web" src="/api/photo/${escapeHtml(p)}" loading="lazy" /></figure>`).join("")}</div>` : ""}
+          </div>`;
+        }).join("")
+      : `<div class="card small muted">還沒有日記</div>`}`;
+  bindBack(b);
+  b.querySelectorAll(".gallery img").forEach((img) => img.addEventListener("click", () => openViewer(img.src)));
 }
 
 // ================= 中日翻譯 =================
@@ -1054,5 +1400,8 @@ function toggleMic() {
   }
   updateMic();
 }
+
+// 離線快取（常用句、票券照片沒網路也能用；畫面更新也會立刻生效）
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 
 checkSession();

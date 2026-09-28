@@ -41,6 +41,11 @@ export default {
 
       if (path === "/api/me") return json({ ok: true, user });
 
+      // 旅遊相簿（日記＋照片），可列印成 PDF
+      if (path === "/api/album" && req.method === "GET") {
+        return room(env).fetch(new Request("https://room/album", { headers }));
+      }
+
       // 網路圖片轉送：避免原網站擋外連；網址由 find_images 簽章，不能當成公開代理使用
       if (path === "/api/img" && req.method === "GET") {
         const target = url.searchParams.get("u") ?? "";

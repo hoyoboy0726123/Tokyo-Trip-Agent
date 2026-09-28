@@ -1,15 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
 import { safeEqual } from "./auth";
-import { providerFor, type GeminiGate } from "./providers";
+import { parseArgs, providerFor, type GeminiGate } from "./providers";
 import { GeminiLimiter, RateLimitedError } from "./ratelimit";
-import { reverseArea, runTool, toolLabel, TOOL_DECLS, type AttachedImage, type ExpenseInput, type RoomApi } from "./tools";
+import { japanAlerts, reverseArea, runTool, SCALE_TEXT, toolLabel, TOOL_DECLS, type AttachedImage, type ExpenseInput, type RoomApi } from "./tools";
 import { looksJapanese, translate, type Lang } from "./translate";
-import { DEFAULT_PHRASES, INITIAL_ITINERARY, TRIP } from "./trip-data";
+import { DEFAULT_CHECKLIST, DEFAULT_PHRASES, INITIAL_ITINERARY, TRIP } from "./trip-data";
 import type { Env, Part, Provider, SessionUser, Turn } from "./types";
 
 const HISTORY_WINDOW = 24; // 每次帶給模型的最近訊息數（更早的靠自動回想找回，省 TPM）
 const HISTORY_CHARS = 600; // 每則歷史訊息最多帶多少字
-const MAX_STEPS = 6; // 單次回答最多工具回合
+const MAX_STEPS = 8; // 單次回答最多工具回合（含系統提醒／代為執行）
 const FOREGROUND_MAX_WAIT = 10_000; // 回答問題時，Gemini 額度滿最多等幾毫秒，超過就改用備援
 const MEMORY_EVERY = 4; // 每 4 則新的成員訊息自動整理一次長期記憶
 const RECALL_LIMIT = 8; // 從較舊的聊天中自動找回的相關訊息數
@@ -44,10 +44,29 @@ function jstNow(): { date: string; time: string; weekday: string } {
   };
 }
 
+/**
+ * 這些話一定要用工具處理。模型（尤其 Gemma）偶爾會「嘴上說已完成」卻沒呼叫工具，
+ * 靠關鍵字抓出來：先提醒一次，再不做就由系統代為執行。順序有意義（打勾要先於加入清單）。
+ */
+const INTENTS: { tool: string; test: (text: string, hasPhoto: boolean) => boolean; alt?: string[] }[] = [
+  { tool: "save_document", test: (t, p) => p && /存成票券|存起來|存進票券|收進票券|保存這張|存下來/.test(t) },
+  { tool: "find_documents", test: (t) => /(給我看|找出|叫出|拿出).{0,12}(票|門票|票券|訂位|確認信|QR|登機證)/.test(t) },
+  { tool: "find_images", test: (t) => /照片|圖片|相片|看圖|附圖|長什麼樣|photo|picture/i.test(t) && !/存|票券/.test(t) },
+  { tool: "add_expense", test: (t, p) => (p && /收據|發票|記帳/.test(t)) || /(我付了|付了|花了|請客|記帳).{0,20}\d/.test(t) || /\d.{0,12}(日圓|円|元).{0,12}(我付|付的|記帳)/.test(t) },
+  { tool: "create_reminder", test: (t) => /提醒(我|大家|全家|我們)/.test(t) && /\d/.test(t) },
+  { tool: "update_checklist_item", test: (t) => /買到了|買好了|帶了|帶好了|打勾|已經買|辦好了|已經填|已經訂/.test(t) },
+  { tool: "add_checklist_items", test: (t) => /想買|要買|加入.{0,4}清單|記得帶|要帶/.test(t) },
+  { tool: "taxi_fare", test: (t) => /(計程車|taxi|叫車|的士).{0,20}(多少|費用|車資|多久|錢|價)/i.test(t) || /車資/.test(t) },
+  { tool: "japan_alerts", test: (t) => /地震|颱風|海嘯|警報|豪雨/.test(t) },
+  { tool: "train_status", test: (t) => /延誤|停駛|誤點|停開|運行狀況|電車.{0,6}(正常|狀況)/.test(t) },
+  { tool: "find_nearby", test: (t) => /附近|周邊|周圍|旁邊有什麼/.test(t), alt: ["web_search"] },
+];
+
 /** 這個問題一定要用到、但模型還沒呼叫的工具（沒有就回 null） */
-function requiredTool(text: string, used: string[]): string | null {
-  if (/照片|圖片|相片|看圖|附圖|長什麼樣|photo|picture/i.test(text) && !used.includes("find_images")) return "find_images";
-  if (/附近|周邊|周圍|旁邊有什麼/.test(text) && !used.some((t) => t === "find_nearby" || t === "web_search")) return "find_nearby";
+function requiredTool(text: string, used: string[], hasPhoto: boolean): string | null {
+  for (const i of INTENTS) {
+    if (i.test(text, hasPhoto) && !used.includes(i.tool) && !(i.alt ?? []).some((a) => used.includes(a))) return i.tool;
+  }
   return null;
 }
 
@@ -68,17 +87,19 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
   private sql: SqlStorage;
   private queue: Promise<unknown> = Promise.resolve();
   private limiter: GeminiLimiter;
+  /** 備援 Gemini 模型的額度在 Google 那邊是分開算的，冷卻也分開 */
+  private backupLimiter: GeminiLimiter;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    this.limiter = new GeminiLimiter(
-      { rpm: Number(env.GEMINI_RPM) || 15, tpm: Number(env.GEMINI_TPM) || 250_000, rpd: Number(env.GEMINI_RPD) || 500 },
-      {
-        load: () => JSON.parse(this.setting("gemini_day", '{"day":"","count":0}')),
-        save: (v) => this.setSetting("gemini_day", JSON.stringify(v)),
-      },
-    );
+    const limits = { rpm: Number(env.GEMINI_RPM) || 15, tpm: Number(env.GEMINI_TPM) || 250_000, rpd: Number(env.GEMINI_RPD) || 500 };
+    const dayStore = (key: string) => ({
+      load: () => JSON.parse(this.setting(key, '{"day":"","count":0}')),
+      save: (v: { day: string; count: number }) => this.setSetting(key, JSON.stringify(v)),
+    });
+    this.limiter = new GeminiLimiter(limits, dayStore("gemini_day"));
+    this.backupLimiter = new GeminiLimiter(limits, dayStore("gemini_day_backup"));
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, ts INTEGER, author TEXT, role TEXT, text TEXT, photo_id TEXT, lat REAL, lon REAL, meta TEXT);
       CREATE INDEX IF NOT EXISTS messages_ts ON messages(ts);
@@ -103,6 +124,23 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       }
       this.setSetting("phrases_seeded", "1");
     }
+    // v4：共用清單、提醒、票券保管箱、旅遊日記
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS checklist (id INTEGER PRIMARY KEY AUTOINCREMENT, list TEXT, item TEXT, for_whom TEXT, author TEXT, done INTEGER DEFAULT 0, done_by TEXT, ts INTEGER);
+      CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, due INTEGER, message TEXT, author TEXT, created INTEGER, sent INTEGER DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS documents (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, author TEXT, title TEXT, note TEXT, photo_id TEXT);
+      CREATE TABLE IF NOT EXISTS diaries (date TEXT PRIMARY KEY, ts INTEGER, text TEXT, photo_ids TEXT);
+    `);
+    if (!this.setting("checklist_seeded")) {
+      for (const c of DEFAULT_CHECKLIST) {
+        this.sql.exec("INSERT INTO checklist (list, item, for_whom, author, ts) VALUES (?, ?, '', '預設', ?)", c.list, c.item, Date.now());
+      }
+      this.setSetting("checklist_seeded", "1");
+    }
+    // 排程（提醒、每日早報、旅遊日記、災害警報）靠 Durable Object 的 alarm，最多每 5 分鐘醒來一次
+    ctx.blockConcurrencyWhile(async () => {
+      if (!(await ctx.storage.getAlarm())) await ctx.storage.setAlarm(Date.now() + 60_000);
+    });
     // v2：位置多存一個地名（反查地址），讓 AI 不用自己猜座標在哪
     if (!this.sql.exec("PRAGMA table_info(locations)").toArray().some((c) => c.name === "area")) {
       this.sql.exec("ALTER TABLE locations ADD COLUMN area TEXT");
@@ -134,6 +172,9 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       workersModel: this.env.WORKERS_AI_MODEL,
       hasGemini: !!this.env.GEMINI_API_KEY,
       hasTavily: !!this.env.TAVILY_API_KEY,
+      autoBrief: this.setting("auto_brief", "1") === "1", // 每天 07:00 早報
+      autoDiary: this.setting("auto_diary", "1") === "1", // 每天 22:00 旅遊日記
+      autoAlerts: this.setting("auto_alerts", "1") === "1", // 地震、颱風、強風豪雨通知
     };
   }
 
@@ -147,6 +188,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     };
 
     if (url.pathname === "/login") return this.login(req);
+    if (url.pathname === "/album") return this.album();
 
     if (url.pathname === "/ws") {
       const pair = new WebSocketPair();
@@ -353,7 +395,51 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
           this.setSetting("travelers", msg.travelers.slice(0, 200));
           this.broadcastState();
         }
+        for (const [k, key] of [["autoBrief", "auto_brief"], ["autoDiary", "auto_diary"], ["autoAlerts", "auto_alerts"]] as const) {
+          if (typeof msg[k] === "boolean") this.setSetting(key, msg[k] ? "1" : "0");
+        }
         this.broadcast({ type: "settings", settings: this.settings() });
+        break;
+      // ---- 清單 ----
+      case "checklist_add": {
+        const items = String(msg.item ?? "").split(/\n/).map((s) => s.trim()).filter(Boolean);
+        if (!items.length) return reply(false, "請輸入項目");
+        this.checklistAdd(String(msg.list || "購物"), items, String(msg.forWhom ?? ""), user.name);
+        break;
+      }
+      case "checklist_toggle":
+        this.checklistUpdate({ id: Number(msg.id) }, { done: !!msg.done }, user.name);
+        break;
+      case "checklist_delete":
+        this.checklistUpdate({ id: Number(msg.id) }, { remove: true }, user.name);
+        break;
+      // ---- 提醒 ----
+      case "reminder_add": {
+        const due = Number(msg.due);
+        if (!Number.isFinite(due) || due < Date.now() - 60_000) return reply(false, "提醒時間不正確或已經過了");
+        this.reminderAdd(due, String(msg.message ?? "").slice(0, 300), user.name);
+        break;
+      }
+      case "reminder_delete":
+        this.reminderDelete(Number(msg.id));
+        break;
+      // ---- 票券 ----
+      case "document_save":
+        if (typeof msg.photoId !== "string") return reply(false, "請先選擇照片");
+        this.documentSave(String(msg.title || "票券").slice(0, 80), String(msg.note ?? "").slice(0, 300), msg.photoId, user.name);
+        break;
+      case "document_delete":
+        this.sql.exec("DELETE FROM documents WHERE id = ?", Number(msg.id));
+        this.broadcastState();
+        break;
+      // ---- 手動觸發早報／日記（管理員，出發前測試用） ----
+      case "brief_now":
+        if (!user.admin) return reply(false, "只有管理員可以使用");
+        await this.postMorningBrief(jstNow().date);
+        break;
+      case "diary_now":
+        if (!user.admin) return reply(false, "只有管理員可以使用");
+        await this.writeDiary(jstNow().date);
         break;
       case "translate": {
         const text = String(msg.text ?? "").trim().slice(0, 1000);
@@ -433,6 +519,13 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
             this.sql.exec("INSERT INTO itinerary VALUES (?, ?, ?, ?, ?, ?)", d.date, d.title, d.detail, d.status, Date.now(), "初始行程");
           }
           cleared.push("行程（還原預設）");
+        }
+        if (msg.tools) {
+          this.sql.exec("DELETE FROM checklist");
+          this.sql.exec("DELETE FROM reminders");
+          this.sql.exec("DELETE FROM documents");
+          this.sql.exec("DELETE FROM diaries");
+          cleared.push("清單、提醒、票券、日記");
         }
         if (!cleared.length) return reply(false, "請至少勾選一項");
         console.log(`reset by ${user.name}: ${cleared.join("、")}`);
@@ -647,6 +740,263 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     this.sql.exec("INSERT INTO cache VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, ts = excluded.ts", key, value, Date.now());
   }
 
+  // ---- 清單 ----
+
+  checklistAdd(list: string, items: string[], forWhom: string, author: string) {
+    const added = items.map(
+      (item) =>
+        this.sql
+          .exec("INSERT INTO checklist (list, item, for_whom, author, ts) VALUES (?, ?, ?, ?, ?) RETURNING id, list, item, for_whom", list, item.slice(0, 200), forWhom.slice(0, 20), author, Date.now())
+          .one(),
+    );
+    this.broadcastState();
+    return { added };
+  }
+
+  checklistUpdate(match: { id?: number; keyword?: string; list?: string }, patch: { done?: boolean; remove?: boolean }, by: string) {
+    let rows: Record<string, SqlStorageValue>[] = [];
+    if (match.id) rows = this.sql.exec("SELECT * FROM checklist WHERE id = ?", match.id).toArray();
+    else if (match.keyword) {
+      rows = match.list
+        ? this.sql.exec("SELECT * FROM checklist WHERE list = ? AND item LIKE ?", match.list, `%${match.keyword}%`).toArray()
+        : this.sql.exec("SELECT * FROM checklist WHERE item LIKE ?", `%${match.keyword}%`).toArray();
+    }
+    if (!rows.length) return { error: "清單裡找不到這個項目" };
+    if (rows.length > 3 && !match.id) return { error: "符合的項目太多，請說得更具體", matches: rows.map((r) => ({ id: r.id, item: r.item })) };
+    for (const r of rows) {
+      if (patch.remove) this.sql.exec("DELETE FROM checklist WHERE id = ?", r.id);
+      else if (typeof patch.done === "boolean") this.sql.exec("UPDATE checklist SET done = ?, done_by = ? WHERE id = ?", patch.done ? 1 : 0, patch.done ? by : null, r.id);
+    }
+    this.broadcastState();
+    return { updated: rows.map((r) => ({ id: r.id, item: r.item, list: r.list })), action: patch.remove ? "刪除" : patch.done ? "打勾" : "取消勾選" };
+  }
+
+  checklistGet(list?: string) {
+    const rows = list
+      ? this.sql.exec("SELECT * FROM checklist WHERE list = ? ORDER BY done, id", list).toArray()
+      : this.sql.exec("SELECT * FROM checklist ORDER BY list, done, id").toArray();
+    return rows.map((r) => ({ id: r.id, list: r.list, item: r.item, for: r.for_whom || undefined, done: !!r.done, done_by: r.done_by || undefined }));
+  }
+
+  // ---- 提醒 ----
+
+  reminderAdd(due: number, message: string, author: string) {
+    const row = this.sql
+      .exec("INSERT INTO reminders (due, message, author, created) VALUES (?, ?, ?, ?) RETURNING id, due, message", due, message, author, Date.now())
+      .one();
+    this.broadcastState();
+    this.ctx.waitUntil(this.scheduleNext());
+    return { ...row, time: new Date(due + 9 * 3600_000).toISOString().slice(0, 16).replace("T", " ") + "（東京時間）" };
+  }
+
+  reminderList() {
+    return this.sql
+      .exec("SELECT * FROM reminders WHERE sent = 0 ORDER BY due")
+      .toArray()
+      .map((r) => ({ id: r.id, time: new Date((r.due as number) + 9 * 3600_000).toISOString().slice(0, 16).replace("T", " "), message: r.message, by: r.author }));
+  }
+
+  reminderDelete(id: number): boolean {
+    const n = this.sql.exec("DELETE FROM reminders WHERE id = ?", id).rowsWritten;
+    this.broadcastState();
+    return n > 0;
+  }
+
+  // ---- 票券保管箱 ----
+
+  documentSave(title: string, note: string, photoId: string, author: string) {
+    const row = this.sql
+      .exec("INSERT INTO documents (ts, author, title, note, photo_id) VALUES (?, ?, ?, ?, ?) RETURNING id, title", Date.now(), author, title, note, photoId)
+      .one();
+    this.broadcastState();
+    return { saved: row, note: "已存進 🧰 工具箱 → 🎫 票券，打開過一次之後沒網路也看得到" };
+  }
+
+  documentFind(keyword?: string) {
+    const words = String(keyword ?? "").split(/\s+/).filter(Boolean).slice(0, 3);
+    const rows = words.length
+      ? this.sql.exec(`SELECT * FROM documents WHERE ${words.map(() => "(title LIKE ? OR note LIKE ?)").join(" AND ")} ORDER BY ts DESC`, ...words.flatMap((w) => [`%${w}%`, `%${w}%`])).toArray()
+      : this.sql.exec("SELECT * FROM documents ORDER BY ts DESC").toArray();
+    return rows as unknown as { id: number; title: string; note: string; photo_id: string; author: string; ts: number }[];
+  }
+
+  // ================= 排程：提醒、每日早報、旅遊日記、災害警報 =================
+
+  /** 下一次醒來：最近的提醒時間，最晚 5 分鐘後（檢查早報、日記、警報） */
+  private async scheduleNext() {
+    const next = this.sql.exec("SELECT MIN(due) AS due FROM reminders WHERE sent = 0").one().due as number | null;
+    const at = Math.max(Date.now() + 5_000, Math.min(next ?? Infinity, Date.now() + 5 * 60_000));
+    await this.ctx.storage.setAlarm(at);
+  }
+
+  async alarm() {
+    try {
+      await this.deliverReminders();
+      const now = jstNow();
+      const hour = Number(now.time.slice(0, 2));
+      const inTrip = now.date >= TRIP.startDate && now.date <= TRIP.endDate;
+      const s = this.settings();
+      if (inTrip && s.autoBrief && hour >= 7 && hour < 11 && this.setting("brief_sent") !== now.date) await this.postMorningBrief(now.date);
+      if (inTrip && s.autoDiary && hour >= 22 && this.setting("diary_sent") !== now.date) await this.writeDiary(now.date);
+      // 警報從出發前一天開始
+      const alertStart = new Date(Date.parse(TRIP.startDate + "T00:00:00Z") - 86400_000).toISOString().slice(0, 10);
+      if (s.autoAlerts && now.date >= alertStart && now.date <= TRIP.endDate) await this.pollAlerts(now.date);
+    } catch (e) {
+      console.error("alarm failed", e);
+    } finally {
+      await this.scheduleNext();
+    }
+  }
+
+  /** 以 AI 身分在群組發一則訊息（提醒、早報、日記、警報共用） */
+  private postAiMessage(text: string, meta: Record<string, unknown>) {
+    const row = this.insertMessage({ author: AI_NAME, role: "assistant", text, photo_id: null, lat: null, lon: null, meta: JSON.stringify(meta) });
+    this.broadcast({ type: "message", message: this.publicMessage(row) });
+    return row;
+  }
+
+  private async deliverReminders() {
+    const due = this.sql.exec("SELECT * FROM reminders WHERE sent = 0 AND due <= ? ORDER BY due", Date.now() + 30_000).toArray();
+    for (const r of due) {
+      this.sql.exec("UPDATE reminders SET sent = 1 WHERE id = ?", r.id);
+      this.postAiMessage(`⏰ **提醒**：${r.message}\n\n（${r.author} 設定的提醒）`, { kind: "reminder" });
+    }
+    if (due.length) this.broadcastState();
+  }
+
+  /** 不用工具、只產生文字（早報、日記）：Gemini 有額度就用，不然用 Gemma */
+  private async generatePlain(system: string, prompt: string): Promise<string> {
+    const order = this.settings().provider === "workers-ai" || !this.settings().hasGemini ? ["workers-ai", "gemini", "gemini-backup"] : ["gemini", "workers-ai", "gemini-backup"];
+    for (const pid of order) {
+      if (pid !== "workers-ai" && !this.settings().hasGemini) continue;
+      try {
+        const r = await providerFor(this.env, pid, this.geminiGate(1, 5_000, undefined, pid === "gemini-backup")).generate({ system, turns: [{ role: "user", parts: [{ text: prompt }] }] });
+        if (r.text.trim()) return r.text.trim();
+      } catch (e) {
+        if (!(e instanceof RateLimitedError)) console.error(`generatePlain via ${pid} failed`, e);
+      }
+    }
+    throw new Error("AI 暫時無法產生內容");
+  }
+
+  async postMorningBrief(date: string) {
+    this.setSetting("brief_sent", date);
+    const today = this.itinerary().find((d) => d.date === date);
+    const [weather, alerts] = await Promise.all([
+      runTool("get_weather", { days: 2 }, { env: this.env, room: this, author: AI_NAME }),
+      japanAlerts().catch(() => ({})),
+    ]);
+    const reminders = this.reminderList().filter((r) => String(r.time).startsWith(date));
+    const todos = this.checklistGet("待辦").filter((c) => !c.done);
+    const prompt = `請幫家庭旅遊群組寫今天（${date}）的「☀️ 早安早報」內文（標題系統會加，你不要再寫標題），繁體中文、親切、適合手機閱讀、300 字內，條列重點：
+1. 今天的行程與建議出門時間（考慮 2 大 2 小）
+2. 天氣與穿著、要不要帶傘
+3. 今天的提醒與待辦
+4. 如果有地震、颱風或強風豪雨，放在最前面提醒
+資料：
+- 今天行程：${today ? `${today.title}｜${today.detail}｜${today.status}` : "沒有排行程"}
+- 天氣：${JSON.stringify(weather).slice(0, 1500)}
+- 警報：${JSON.stringify(alerts).slice(0, 1500)}
+- 今天的提醒：${JSON.stringify(reminders)}
+- 未完成待辦：${JSON.stringify(todos.slice(0, 8))}
+- 住宿：${TRIP.accommodation.name}，${TRIP.accommodation.nearestStation}`;
+    const text = await this.generatePlain(this.systemPrompt(), prompt);
+    this.postAiMessage(`☀️ **早安！${date.slice(5).replace("-", "/")} 早報**\n\n${text}`, { kind: "brief" });
+  }
+
+  async writeDiary(date: string) {
+    this.setSetting("diary_sent", date);
+    const start = Date.parse(date + "T00:00:00Z") - 9 * 3600_000;
+    const msgs = this.sql.exec<MessageRow>("SELECT * FROM messages WHERE ts >= ? AND ts < ? ORDER BY ts", start, start + 86400_000).toArray();
+    const photos = msgs.filter((m) => m.photo_id && m.role === "user").map((m) => m.photo_id as string).slice(0, 8);
+    const spent = this.sql.exec("SELECT COALESCE(SUM(amount_jpy), 0) AS jpy FROM expenses WHERE date = ?", date).one().jpy as number;
+    const today = this.itinerary().find((d) => d.date === date);
+    const transcript = msgs
+      .filter((m) => m.role !== "system" && (m.meta ? !JSON.parse(m.meta).kind : true))
+      .map((m) => `${m.role === "assistant" ? AI_NAME : m.author}：${m.text.slice(0, 200)}${m.photo_id ? "（照片）" : ""}`)
+      .join("\n")
+      .slice(-6000);
+    const prompt = `請用今天的群組對話，幫這個台灣家庭寫一篇「📔 旅遊日記」的內文（標題、日期系統會加，你不要再寫），繁體中文，溫馨有趣、像家人一起回憶，300–400 字。
+寫出今天去了哪裡、吃了什麼、小朋友的有趣時刻、印象深刻的事；不要編造對話裡沒有的事，資料少就寫短一點。
+日期：${date}；行程：${today ? today.title : "自由活動"}；今天花費約 ¥${Math.round(spent).toLocaleString()}；照片 ${photos.length} 張
+對話：
+${transcript || "（今天群組沒什麼對話）"}`;
+    const text = await this.generatePlain("你是幫家庭寫旅遊日記的溫暖作家，只根據提供的資料寫。", prompt);
+    this.sql.exec(
+      "INSERT INTO diaries (date, ts, text, photo_ids) VALUES (?, ?, ?, ?) ON CONFLICT(date) DO UPDATE SET ts = excluded.ts, text = excluded.text, photo_ids = excluded.photo_ids",
+      date, Date.now(), text, JSON.stringify(photos),
+    );
+    const images: AttachedImage[] = photos.map((id) => ({ src: `/api/photo/${id}`, caption: "", source: "今天的照片" }));
+    this.postAiMessage(`📔 **${date.slice(5).replace("-", "/")} 旅遊日記**\n\n${text}\n\n（🧰 工具箱 → 📔 日記 可以看全部、匯出相簿）`, { kind: "diary", images });
+    this.broadcastState();
+  }
+
+  /** 地震（關東震度 3 以上）、海嘯、新颱風、隔天強風豪雨：有新狀況才在群組發通知 */
+  private async pollAlerts(date: string) {
+    const a: any = await japanAlerts();
+    const seen: string[] = JSON.parse(this.setting("alerts_seen", "[]"));
+    const first = !this.setting("alerts_initialized");
+    const notes: string[] = [];
+    for (const q of Array.isArray(a.earthquakes) ? a.earthquakes : []) {
+      const key = `eq:${q.id}`;
+      if (seen.includes(key)) continue;
+      seen.push(key);
+      const scale = Object.entries(SCALE_TEXT).find(([, v]) => v === q.kanto_max_intensity)?.[0];
+      if (!first && scale && Number(scale) >= 30) {
+        notes.push(`🌏 **地震**：${q.time} ${q.place} 規模 ${q.magnitude}，**關東最大震度 ${q.kanto_max_intensity}**${q.tsunami && q.tsunami !== "None" ? `，海嘯：${q.tsunami}` : "，無海嘯疑慮"}`);
+      }
+    }
+    for (const t of Array.isArray(a.tsunami) ? a.tsunami : []) {
+      const key = `ts:${t.time}`;
+      if (seen.includes(key)) continue;
+      seen.push(key);
+      if (!first && t.areas?.some((x: string) => /東京|千葉|神奈川|相模|九十九里/.test(x))) notes.push(`🌊 **海嘯警報**：${t.areas.join("、")}。請遠離海岸，往高處移動！`);
+    }
+    for (const t of Array.isArray(a.typhoons) ? a.typhoons : []) {
+      const key = `tc:${t.number}`;
+      if (seen.includes(key)) continue;
+      seen.push(key);
+      if (!first) notes.push(`🌀 **颱風**：氣象廳發布了${t.number}颱風的資訊，可以問我「颱風會不會影響行程」。`);
+    }
+    const severe = (Array.isArray(a.tokyo_forecast) ? a.tokyo_forecast : []).filter((d: any) => d.severe && d.date >= date).slice(0, 2);
+    for (const d of severe) {
+      const key = `wx:${d.date}`;
+      if (seen.includes(key)) continue;
+      seen.push(key);
+      notes.push(`🌧 **${d.date.slice(5).replace("-", "/")} 天氣警示**：${d.weather}，雨量約 ${d.rain_mm} mm、陣風 ${d.max_gust_kmh} km/h，戶外行程請準備雨具或考慮室內備案。`);
+    }
+    this.setSetting("alerts_seen", JSON.stringify(seen.slice(-200)));
+    this.setSetting("alerts_initialized", "1");
+    if (notes.length) {
+      this.postAiMessage(`⚠️ **警報通知**\n\n${notes.join("\n\n")}\n\n緊急電話：警察 110、救護車／消防 119；日本觀光局 24 小時中文熱線 050-3816-2787`, { kind: "alert" });
+    }
+  }
+
+  /** 旅遊相簿：日記＋照片，可以用瀏覽器「列印 → 存成 PDF」 */
+  private album(): Response {
+    const esc = (s: unknown) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+    const diaries = this.sql.exec("SELECT * FROM diaries ORDER BY date").toArray();
+    const body = diaries.length
+      ? diaries
+          .map((d) => {
+            const photos: string[] = JSON.parse((d.photo_ids as string) || "[]");
+            return `<section><h2>${esc(String(d.date).slice(5).replace("-", "/"))}</h2>
+              <p>${esc(d.text).replace(/\n/g, "<br>")}</p>
+              <div class="photos">${photos.map((p) => `<img src="/api/photo/${esc(p)}" loading="lazy">`).join("")}</div></section>`;
+          })
+          .join("")
+      : "<p>還沒有日記。旅途中每晚 22:00 會自動寫一篇。</p>";
+    const html = `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(TRIP.title)} 相簿</title><style>
+body{font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;max-width:760px;margin:0 auto;padding:24px 16px;color:#222;line-height:1.7}
+h1{color:#c8102e}section{page-break-inside:avoid;margin-bottom:32px;border-top:2px solid #eee;padding-top:12px}
+.photos{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}.photos img{width:100%;border-radius:10px}
+.bar{position:sticky;top:0;background:#fff;padding:8px 0}@media print{.bar{display:none}}
+</style></head><body><div class="bar"><button onclick="print()">🖨 列印／存成 PDF</button></div>
+<h1>🗼 ${esc(TRIP.title)}</h1><p>${esc(TRIP.startDate)} – ${esc(TRIP.endDate)}</p>${body}</body></html>`;
+    return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+  }
+
   // ================= 畫面上的狀態（行程、記憶、帳目） =================
 
   private itinerary() {
@@ -666,8 +1016,15 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       summary: this.setting("summary"),
       gemini: this.limiter.usage(),
       phrases: this.sql.exec("SELECT id, category, zh, ja, kana, author FROM phrases ORDER BY id").toArray(),
+      checklist: this.checklistGet(),
+      reminders: this.reminderList(),
+      documents: this.documentFind().map((d) => ({ id: d.id, title: d.title, note: d.note, author: d.author, ts: d.ts, photo: `/api/photo/${d.photo_id}` })),
+      diaries: this.sql.exec("SELECT date, ts, text, photo_ids FROM diaries ORDER BY date DESC").toArray(),
       locations: this.memberLocation(),
-      trip: { title: TRIP.title, startDate: TRIP.startDate, endDate: TRIP.endDate, accommodation: TRIP.accommodation.name },
+      trip: {
+        title: TRIP.title, startDate: TRIP.startDate, endDate: TRIP.endDate, accommodation: TRIP.accommodation.name,
+        accommodationCoords: { lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon },
+      },
     };
   }
 
@@ -784,6 +1141,12 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 成員要求看照片／圖片時，一定要用 find_images（店名或景點名稱加地名；好幾個地方就放進 queries 一次查完）；圖片會自動顯示在回答下方。絕對不要自己產生圖片網址或 Google 圖片搜尋連結，並提醒是網路圖片、僅供參考。沒有要求就不要找圖片。
 - 問「我附近有什麼」：直接用 find_nearby，near 留空（系統會自動用發問者的 GPS），回答時列出實際店名、距離、步行分鐘與地圖連結，不要只給「附近有很多」這種泛泛建議；需要評價再用 web_search 補充。問「某個地方附近有什麼」（例如龜有公園附近），也要用 find_nearby，near 填日文地名（亀有公園）。問「我在哪」用 get_member_locations，說出區域與最近的車站。
 - 迪士尼當天問排隊，用 disney_wait_times。
+- 問電車有沒有延誤、停駛 → train_status；問計程車多少錢、要多久 → taxi_fare；問地震、颱風、天氣會不會影響行程 → japan_alerts。
+- 收到收據照片（或說「記帳這張收據」）：讀出店名、含稅總金額與主要品項，用 add_expense 記帳（description 寫「店名：品項」），付款人預設是發問者；若是免稅店或金額可能達免稅門檻，順便提醒。
+- 想買的東西、要帶的行李、待辦事項 → add_checklist_items；買到了、帶了、辦好了 → update_checklist_item；問清單 → get_checklist。
+- 要求「幾點提醒」→ create_reminder（時間用東京時間 YYYY-MM-DD HH:mm）。
+- 傳照片說要「存起來／存成票券」→ save_document；問「給我看○○的票／訂位」→ find_documents。
+- 有人傳「🆘」走散求助：先安撫，用 get_member_locations 看大家在哪，建議就近約在明顯地標或車站剪票口集合，提醒可找工作人員幫忙、緊急打 110。
 - 有人說「我付了／花了…」→ 用 add_expense 記帳；問「花多少、怎麼分」→ expense_summary。
 - 成員做了決定、說了偏好、訂了東西、改了計畫 → 主動用 remember 或 update_itinerary 記下來。只有工具呼叫成功後才能說「已記住／已更新」；沒有呼叫工具就不要聲稱已記住（系統也會在背景定期自動整理記憶）。
 - 收到照片：辨識菜單、商品、看板、車票並翻譯說明；商品可以查價比價並試算免稅（tax_free_check）。
@@ -826,7 +1189,11 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
     const id = newId();
     const settings = this.settings();
     const primary = settings.provider === "workers-ai" || !settings.hasGemini ? "workers-ai" : "gemini";
-    const order = primary === "gemini" ? ["gemini", "workers-ai"] : settings.hasGemini ? ["workers-ai", "gemini"] : ["workers-ai"];
+    // 主要 → 備援 → 最後防線（Gemini 另一個模型額度分開算；避免 Gemini 塞車又遇到 Workers AI 每日額度用完時全掛）
+    const order =
+      primary === "gemini" ? ["gemini", "workers-ai", "gemini-backup"]
+      : settings.hasGemini ? ["workers-ai", "gemini", "gemini-backup"]
+      : ["workers-ai"];
 
     let image: Part | null = null;
     if (trigger.photo_id) {
@@ -842,16 +1209,16 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
     let lastError = "";
     // 跨模型共用：Gemini 中途被限流時，備援模型接著已完成的工具結果繼續，不會重複記帳或重複查詢
     let turns = this.buildTurns(history, trigger, image);
-    const gate = this.geminiGate(1, FOREGROUND_MAX_WAIT, (ms) =>
-      this.broadcast({ type: "ai_note", id, text: `Gemini 額度冷卻中，等待 ${Math.ceil(ms / 1000)} 秒…` }),
-    );
+    const onWait = (ms: number) => this.broadcast({ type: "ai_note", id, text: `Gemini 額度冷卻中，等待 ${Math.ceil(ms / 1000)} 秒…` });
+    const gate = this.geminiGate(1, FOREGROUND_MAX_WAIT, onWait);
+    const backupGate = this.geminiGate(1, FOREGROUND_MAX_WAIT, onWait, true);
 
     for (const pid of order) {
-      const provider: Provider = providerFor(this.env, pid, gate);
+      const provider: Provider = providerFor(this.env, pid, pid === "gemini-backup" ? backupGate : gate);
       this.broadcast({ type: "ai_start", id, provider: provider.id, model: provider.model });
       let finalText = "";
-      let nudged = false;
-      let forced = false;
+      const nudged = new Set<string>();
+      const forced = new Set<string>();
       try {
         for (let step = 0; step < MAX_STEPS; step++) {
           const res = await provider.generate({
@@ -861,22 +1228,22 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
             onDelta: (delta) => this.broadcast({ type: "ai_delta", id, delta }),
           });
           if (!res.calls.length) {
-            // 模型偶爾偷懶：說「圖片在下方」卻沒找圖、問附近卻沒查。提醒一次，重新回答
-            const need = requiredTool(trigger.text, toolsUsed);
-            if (need && !nudged && step < MAX_STEPS - 1) {
-              nudged = true;
+            // 模型偶爾偷懶：嘴上說「已加入清單」「圖片在下方」卻沒呼叫工具。提醒一次，重新回答
+            const need = requiredTool(trigger.text, toolsUsed, !!trigger.photo_id);
+            if (need && !nudged.has(need) && step < MAX_STEPS - 1) {
+              nudged.add(need);
               this.broadcast({ type: "ai_reset", id });
               turns = [
                 ...turns,
                 { role: "model", parts: [{ text: res.text || "（略）" }] },
-                { role: "user", parts: [{ text: `（系統提醒：你還沒有呼叫 ${need}，這個問題一定要先呼叫 ${need} 查詢，再根據結果重新回答。）` }] },
+                { role: "user", parts: [{ text: `（系統提醒：你還沒有呼叫 ${need}，這件事一定要呼叫 ${need} 才算完成，沒有呼叫就不能說已完成。請現在呼叫，再根據結果回答。）` }] },
               ];
               continue;
             }
             // 提醒過還是不呼叫：系統自己執行工具，再請模型根據結果回答
-            if (need && nudged && !forced && step < MAX_STEPS - 1) {
-              forced = true;
-              const note = await this.forceTool(need, provider, history, trigger, user, id, images, toolsUsed);
+            if (need && !forced.has(need) && step < MAX_STEPS - 1) {
+              forced.add(need);
+              const note = await this.forceTool(need, provider, history, trigger, user, id, images, toolsUsed, image);
               if (note) {
                 this.broadcast({ type: "ai_reset", id });
                 turns = [
@@ -898,7 +1265,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
             toolsUsed.push(c.name);
             this.broadcast({ type: "ai_tool", id, name: c.name, label: toolLabel(c.name), args: c.args });
             const result = await runTool(c.name, c.args, {
-              env: this.env, room: this, author: user.name,
+              env: this.env, room: this, author: user.name, photoId: trigger.photo_id,
               attachImage: (img) => images.length < 8 && images.push(img),
             });
             resultParts.push({ result: { id: c.id, name: c.name, response: result } });
@@ -938,9 +1305,12 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
    */
   private async forceTool(
     need: string, provider: Provider, history: MessageRow[], trigger: MessageRow, user: Attachment,
-    id: string, images: AttachedImage[], toolsUsed: string[],
+    id: string, images: AttachedImage[], toolsUsed: string[], image: Part | null,
   ): Promise<string | null> {
-    const ctx = { env: this.env, room: this, author: user.name, attachImage: (img: AttachedImage) => images.length < 8 && images.push(img) };
+    const ctx = {
+      env: this.env, room: this, author: user.name, photoId: trigger.photo_id,
+      attachImage: (img: AttachedImage) => images.length < 8 && images.push(img),
+    };
     let args: Record<string, unknown>;
     if (need === "find_images") {
       const lastAi = [...history].reverse().find((m) => m.role === "assistant" && m.id !== id)?.text ?? "";
@@ -970,7 +1340,26 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
         : /車站|捷運|地鐵|電車/.test(t) ? "station" : /公園|遊樂場/.test(t) ? "park" : /購物|百貨|商場|逛街/.test(t) ? "shopping" : "food";
       args = { category };
     } else {
-      return null;
+      // 其他工具：請模型用 JSON 模式（很穩定）照工具規格產生參數，收據照片也一起給它看
+      const decl = TOOL_DECLS.find((d) => d.name === need);
+      if (!decl) return null;
+      const now = jstNow();
+      try {
+        const parts: Part[] = [{
+          text: `成員（${user.name}）說：「${trigger.text}」
+現在是東京時間 ${now.date}（${now.weekday}）${now.time}。旅伴名單：${this.members().join("、") || user.name}。
+請產生呼叫工具「${need}」要用的參數。
+工具說明：${decl.description}
+參數格式（JSON Schema）：${JSON.stringify(decl.parameters)}
+只輸出參數的 JSON 物件，不要任何其他文字。`,
+        }];
+        if (image && need === "add_expense") parts.push(image);
+        const r = await provider.generate({ system: "你只輸出 JSON。", turns: [{ role: "user", parts }], json: true });
+        args = parseArgs(r.text.replace(/^\s*```(?:json)?|```\s*$/g, "").trim());
+      } catch {
+        return null;
+      }
+      if (!Object.keys(args).length) return null;
     }
     toolsUsed.push(need);
     this.broadcast({ type: "ai_tool", id, name: need, label: toolLabel(need), args });
@@ -979,10 +1368,11 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
   }
 
   /** share：可用的 Gemini 額度比例；maxWait：額度滿時最多等幾毫秒，超過就改用備援 */
-  private geminiGate(share: number, maxWait: number, onWait?: (ms: number) => void): GeminiGate {
+  private geminiGate(share: number, maxWait: number, onWait?: (ms: number) => void, backup = false): GeminiGate {
+    const l = backup ? this.backupLimiter : this.limiter;
     return {
-      acquire: (estimate) => this.limiter.acquire(estimate, share, maxWait, onWait),
-      failed: (status, body) => this.limiter.penalize(status, body),
+      acquire: (estimate) => l.acquire(estimate, share, maxWait, onWait),
+      failed: (status, body) => l.penalize(status, body),
     };
   }
 
