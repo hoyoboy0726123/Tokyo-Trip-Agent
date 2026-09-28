@@ -1,0 +1,52 @@
+// 旅程的初始資料。第一次啟動時寫進資料庫，之後修改都存在資料庫（長期記憶）。
+// 門鎖密碼、Wi-Fi 密碼等敏感資訊不寫在程式碼裡，請在聊天中叫 AI「記住」。
+
+export const TRIP = {
+  title: "東京親子旅行 2026",
+  travelers: "2 大 2 小的台灣家庭",
+  timezone: "Asia/Tokyo",
+  startDate: "2026-10-03",
+  endDate: "2026-10-10",
+  accommodation: {
+    name: "IKEBUKURO 4（Airbnb）",
+    address: "〒171-0043 東京都豊島区要町1-44-8 セレッソ要町B棟",
+    addressEn: "Seresso Kanamecho B Wing, 1-44-8 Kanamecho, Toshima-ku, Tokyo 171-0043",
+    lat: 35.7345,
+    lon: 139.6925,
+    nearestStation: "東京地鐵有樂町線／副都心線「要町站」1 號出口（有電梯），步行約 8 分；計程車約 3 分、約 ¥500",
+    walkingRoute:
+      "要町站 1 號出口搭電梯上地面 → 出電梯右轉直走 → 過一個斑馬線後進入右手邊「えびす通り商店街」→ 看到右手邊停車場看板左轉 → 直走再右轉 → 沿路約 100 公尺到達",
+    checkIn: "15:00（想提早入住需幾天前聯絡房東）",
+    checkOut: "10:00",
+    googleMap: "https://maps.app.goo.gl/57djKazchrC7dmwx8",
+    rules: [
+      "全面禁菸（含電子菸）",
+      "晚上 8 點後請降低音量（曾有鄰居報警）",
+      "玄關脫鞋",
+      "禁止派對",
+      "垃圾不可丟在外面，退房後房東處理",
+      "行李箱等大型垃圾丟棄會另外收費",
+      "外出請關燈；用鑰匙進門的退房時要放回原位",
+    ],
+  },
+  flights: [
+    { date: "2026-10-03", flight: "長榮 BR198", from: "桃園 T2 09:00", to: "成田 T1 13:25" },
+    { date: "2026-10-10", flight: "星宇 JX805", from: "成田 T2 20:40", to: "桃園 T1 23:20" },
+  ],
+  airportRoutes: `成田機場 → 住宿（要町）：
+- 推薦：京成 Skyliner（成田第 1 航廈站「成田空港駅」上車）→ 日暮里（約 40–45 分）→ JR 山手線往池袋（9 分）→ 池袋轉東京地鐵有樂町線往和光市（2 分）→ 要町站 → 步行 8 分。Skyliner 網路預購大人 ¥2,310、兒童（6–11 歲）¥1,150；未滿 6 歲免費。
+- 帶小孩行李多：Skyliner 到日暮里後直接叫計程車到住宿（約 ¥3,500–4,500）。
+- 巴士：Narita Shuttle（WILLER）到池袋西口，提前 24 小時預訂 ¥1,900（當日 ¥2,300），約 1 小時 45 分；或利木津巴士 ¥3,600。
+- 回程 10/10 星宇從「第 2 航廈」出發：Skyliner 在「空港第2ビル駅」下車，建議 17:30 前從住宿出發。`,
+};
+
+export const INITIAL_ITINERARY: { date: string; title: string; detail: string; status: string }[] = [
+  { date: "2026-10-03", title: "抵達成田 → 前往要町住宿", detail: "BR198 13:25 抵達成田 T1，入住後在附近簡單逛逛", status: "住宿固定" },
+  { date: "2026-10-04", title: "藤子・F・不二雄博物館", detail: "預約 11:00 入館", status: "✅ 4 張票已買" },
+  { date: "2026-10-05", title: "池袋／Sunshine City 一帶", detail: "彈性逛街日", status: "彈性" },
+  { date: "2026-10-06", title: "東京迪士尼樂園 Disneyland 整天", detail: "", status: "✅ 4 張票已買，約 NT$6,300" },
+  { date: "2026-10-07", title: "龜有《烏龍派出所》主題日", detail: "兩津勘吉相關景點、銅像、龜有公園等，保留完整龜有行程", status: "確定" },
+  { date: "2026-10-08", title: "彈性／休息／購物日", detail: "不去讀賣；不換 PRANA", status: "彈性" },
+  { date: "2026-10-09", title: "東京迪士尼海洋 DisneySea 整天", detail: "早上直接從要町住宿叫車前往", status: "⚠️ 尚未購票" },
+  { date: "2026-10-10", title: "最後採買 → 成田機場 → 返台", detail: "星宇 JX805 20:40 成田 T2 起飛", status: "回程日" },
+];

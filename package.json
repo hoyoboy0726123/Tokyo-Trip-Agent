@@ -1,0 +1,21 @@
+{
+  "name": "tokyo-trip-agent",
+  "version": "1.0.0",
+  "description": "東京家族旅行 AI 群聊助理",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "setup": "bash scripts/setup.sh"
+  },
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260928.1",
+    "dompurify": "^3.4.16",
+    "marked": "^15.0.12",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.142.0"
+  },
+  "private": true
+}

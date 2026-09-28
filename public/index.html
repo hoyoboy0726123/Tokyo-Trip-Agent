@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+  <title>東京旅伴</title>
+  <meta name="theme-color" content="#c8102e" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="東京旅伴" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <link rel="stylesheet" href="/style.css" />
+  <script src="/vendor/marked.min.js" defer></script>
+  <script src="/vendor/purify.min.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <!-- 登入 -->
+  <section id="login" class="login" hidden>
+    <form id="login-form" class="login-card">
+      <div class="login-logo">🗼</div>
+      <h1>東京旅伴</h1>
+      <p class="muted">2026/10/3 – 10/10 東京親子旅行</p>
+      <label>你的暱稱
+        <input id="login-name" name="name" maxlength="16" placeholder="例如：爸爸、媽媽、哥哥" autocomplete="nickname" required />
+      </label>
+      <label>房間密碼
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <p id="login-error" class="error" hidden></p>
+      <button type="submit" class="primary">進入群聊</button>
+    </form>
+  </section>
+
+  <!-- 主畫面 -->
+  <section id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="topbar-main">
+        <div class="day-badge" id="day-badge">Day –</div>
+        <div class="topbar-text">
+          <div class="today-title" id="today-title">東京旅伴</div>
+          <div class="online" id="online"></div>
+        </div>
+      </div>
+      <nav class="topbar-actions">
+        <button data-panel="itinerary" title="行程">📅</button>
+        <button data-panel="expenses" title="記帳">💰</button>
+        <button data-panel="memories" title="記憶">🧠</button>
+        <button data-panel="settings" title="設定">⚙️</button>
+      </nav>
+    </header>
+
+    <div id="conn" class="conn" hidden>連線中…</div>
+
+    <main id="messages" class="messages" aria-live="polite">
+      <button id="load-more" class="load-more" hidden>載入更早的訊息</button>
+    </main>
+
+    <footer class="composer">
+      <div class="chips" id="chips">
+        <button data-q="今天的行程和天氣？">📅 今天</button>
+        <button data-q="我附近有什麼好吃的？">🍜 附近美食</button>
+        <button data-q="現在日圓匯率多少？1000 日圓等於多少台幣？">💱 匯率</button>
+        <button data-q="迪士尼現在哪些設施排隊最少？">🏰 迪士尼排隊</button>
+        <button data-q="目前花了多少錢？大家要怎麼分？">💰 帳目</button>
+        <button data-q="我要怎麼回住宿？">🏠 回住宿</button>
+      </div>
+      <div id="attach" class="attach" hidden>
+        <img id="attach-img" alt="" />
+        <span id="attach-loc"></span>
+        <button id="attach-clear" class="icon" title="移除">✕</button>
+      </div>
+      <form id="send-form" class="send-row">
+        <label class="icon" title="拍照／上傳照片">📷<input id="photo-input" type="file" accept="image/*" hidden /></label>
+        <button type="button" id="loc-btn" class="icon" title="附上目前位置">📍</button>
+        <textarea id="input" rows="1" placeholder="問旅伴 AI 任何事…" enterkeyhint="send"></textarea>
+        <button type="submit" class="send" id="send-btn" title="送出">➤</button>
+      </form>
+    </footer>
+  </section>
+
+  <!-- 面板 -->
+  <dialog id="panel" class="panel">
+    <div class="panel-head">
+      <h2 id="panel-title"></h2>
+      <button class="icon" id="panel-close">✕</button>
+    </div>
+    <div id="panel-body" class="panel-body"></div>
+  </dialog>
+
+  <dialog id="viewer" class="viewer"><img id="viewer-img" alt="" /></dialog>
+</body>
+</html>
