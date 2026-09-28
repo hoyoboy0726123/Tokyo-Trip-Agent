@@ -27,9 +27,18 @@ const timeText = (ts) => jst(ts).toISOString().slice(11, 16);
 const dayText = (ts) => { const d = jst(ts); return `${d.getUTCMonth() + 1}/${d.getUTCDate()}（${"日一二三四五六"[d.getUTCDay()]}）`; };
 const yen = (n) => `${n < 0 ? "-" : ""}¥${Math.abs(Math.round(n)).toLocaleString()}`;
 
+// 模型偶爾會寫 $\rightarrow$ 這類 LaTeX；聊天室不載數學排版，換成對應符號就好
+const LATEX = { rightarrow: "→", to: "→", leftarrow: "←", Rightarrow: "⇒", times: "×", div: "÷", approx: "≈", pm: "±", le: "≤", leq: "≤", ge: "≥", geq: "≥", neq: "≠", cdot: "·", sim: "～", yen: "¥" };
+function unLatex(text) {
+  return String(text ?? "")
+    .replace(/\$\s*\\([a-zA-Z]+)\s*\$/g, (m, k) => LATEX[k] ?? m)
+    .replace(/\\(rightarrow|leftarrow|Rightarrow|times|approx|cdot)\b/g, (_, k) => LATEX[k]);
+}
+
 function md(text) {
+  text = unLatex(text);
   if (window.marked && window.DOMPurify) {
-    const html = DOMPurify.sanitize(marked.parse(text ?? "", { breaks: true }));
+    const html = DOMPurify.sanitize(marked.parse(text, { breaks: true }));
     return html.replace(/<a /g, '<a target="_blank" rel="noopener" ');
   }
   return escapeHtml(text).replace(/\n/g, "<br>");
