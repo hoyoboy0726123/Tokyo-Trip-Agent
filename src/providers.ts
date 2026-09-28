@@ -149,6 +149,15 @@ export function workersAIProvider(env: Env, model?: string): Provider {
         chat_template_kwargs: { enable_thinking: false },
       };
       if (tools?.length) input.tools = tools.map((t) => ({ type: "function", function: t }));
+
+      // 聊天回答用串流，讓文字一個一個出現；整理記憶（json）不需要
+      if (onDelta && !json) {
+        try {
+          return await streamWorkersAI(env, m, input, onDelta);
+        } catch (e) {
+          console.error("workers-ai stream failed, retry without stream", e);
+        }
+      }
       const out: any = await env.AI.run(m as any, input as any);
 
       const text: string = out?.response ?? out?.choices?.[0]?.message?.content ?? "";
@@ -169,6 +178,82 @@ export function workersAIProvider(env: Env, model?: string): Provider {
       return { text: typeof text === "string" ? text : JSON.stringify(text), calls };
     },
   };
+}
+
+/** Workers AI 串流（SSE）：同時支援 OpenAI 格式（choices[].delta）與舊格式（response） */
+async function streamWorkersAI(env: Env, model: string, input: Record<string, unknown>, onDelta: (t: string) => void): Promise<GenerateResult> {
+  const stream = (await env.AI.run(model as any, { ...input, stream: true } as any)) as unknown as ReadableStream<Uint8Array>;
+  if (!stream || typeof (stream as any).getReader !== "function") throw new Error("沒有收到串流");
+  const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  let text = "";
+  let sentAny = false;
+  const pending: string[] = [];
+  const calls = new Map<number, { id?: string; name: string; args: string }>();
+  const legacyCalls: any[] = [];
+
+  // 模型有時先講一段話再決定呼叫工具；先暫存開頭，確定不是工具呼叫再送出
+  const flush = (force = false) => {
+    if (calls.size || legacyCalls.length) return;
+    if (!sentAny && !force && text.length < 12) return;
+    while (pending.length) onDelta(pending.shift()!);
+    sentAny = true;
+  };
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += value;
+    let idx: number;
+    while ((idx = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      let chunk: any;
+      try {
+        chunk = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      const delta = chunk.choices?.[0]?.delta ?? {};
+      const piece: string = typeof delta.content === "string" ? delta.content : typeof chunk.response === "string" ? chunk.response : "";
+      for (const tc of delta.tool_calls ?? []) {
+        const i = tc.index ?? calls.size;
+        const cur = calls.get(i) ?? { id: undefined, name: "", args: "" };
+        if (tc.id) cur.id = tc.id;
+        if (tc.function?.name) cur.name += tc.function.name;
+        if (tc.function?.arguments) cur.args += typeof tc.function.arguments === "string" ? tc.function.arguments : JSON.stringify(tc.function.arguments);
+        calls.set(i, cur);
+      }
+      if (Array.isArray(chunk.tool_calls)) legacyCalls.push(...chunk.tool_calls);
+      if (piece) {
+        text += piece;
+        pending.push(piece);
+        flush();
+      }
+    }
+  }
+  flush(true);
+
+  const parsed = [
+    ...[...calls.values()].map((c) => ({ id: c.id, name: c.name, arguments: c.args })),
+    ...legacyCalls.map((c) => ({ id: c.id, name: c.function?.name ?? c.name, arguments: c.function?.arguments ?? c.arguments })),
+  ]
+    .filter((c) => c.name)
+    .map((c) => {
+      let args: any = c.arguments ?? {};
+      if (typeof args === "string") {
+        try {
+          args = args ? JSON.parse(args) : {};
+        } catch {
+          args = {};
+        }
+      }
+      return { id: c.id || `call_${crypto.randomUUID().slice(0, 8)}`, name: c.name, args };
+    });
+  return { text, calls: parsed };
 }
 
 /** gemini = 主要模型；gemini-backup = 另一個 Gemini 模型（目前備援順序未使用） */

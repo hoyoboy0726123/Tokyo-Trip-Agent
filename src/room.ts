@@ -3,7 +3,8 @@ import { safeEqual } from "./auth";
 import { providerFor, type GeminiGate } from "./providers";
 import { GeminiLimiter, RateLimitedError } from "./ratelimit";
 import { reverseArea, runTool, toolLabel, TOOL_DECLS, type AttachedImage, type ExpenseInput, type RoomApi } from "./tools";
-import { INITIAL_ITINERARY, TRIP } from "./trip-data";
+import { looksJapanese, translate, type Lang } from "./translate";
+import { DEFAULT_PHRASES, INITIAL_ITINERARY, TRIP } from "./trip-data";
 import type { Env, Part, Provider, SessionUser, Turn } from "./types";
 
 const HISTORY_WINDOW = 24; // 每次帶給模型的最近訊息數（更早的靠自動回想找回，省 TPM）
@@ -41,6 +42,13 @@ function jstNow(): { date: string; time: string; weekday: string } {
     time: d.toISOString().slice(11, 16),
     weekday: "日一二三四五六"[d.getUTCDay()],
   };
+}
+
+/** 這個問題一定要用到、但模型還沒呼叫的工具（沒有就回 null） */
+function requiredTool(text: string, used: string[]): string | null {
+  if (/照片|圖片|相片|看圖|附圖|長什麼樣|photo|picture/i.test(text) && !used.includes("find_images")) return "find_images";
+  if (/附近|周邊|周圍|旁邊有什麼/.test(text) && !used.some((t) => t === "find_nearby" || t === "web_search")) return "find_nearby";
+  return null;
 }
 
 function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -84,6 +92,17 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT, ts INTEGER);
       CREATE TABLE IF NOT EXISTS login_attempts (ip TEXT PRIMARY KEY, count INTEGER, ts INTEGER);
     `);
+    // v3：翻譯頁（全家共用的常用句、翻譯紀錄）
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS phrases (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT, zh TEXT, ja TEXT, kana TEXT, author TEXT, ts INTEGER);
+      CREATE TABLE IF NOT EXISTS translations (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, author TEXT, from_lang TEXT, source TEXT, result TEXT, reading TEXT);
+    `);
+    if (!this.setting("phrases_seeded")) {
+      for (const p of DEFAULT_PHRASES) {
+        this.sql.exec("INSERT INTO phrases (category, zh, ja, kana, author, ts) VALUES (?, ?, ?, ?, ?, ?)", p.category, p.zh, p.ja, p.kana, "預設", Date.now());
+      }
+      this.setSetting("phrases_seeded", "1");
+    }
     // v2：位置多存一個地名（反查地址），讓 AI 不用自己猜座標在哪
     if (!this.sql.exec("PRAGMA table_info(locations)").toArray().some((c) => c.name === "area")) {
       this.sql.exec("ALTER TABLE locations ADD COLUMN area TEXT");
@@ -336,6 +355,54 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
         }
         this.broadcast({ type: "settings", settings: this.settings() });
         break;
+      case "translate": {
+        const text = String(msg.text ?? "").trim().slice(0, 1000);
+        if (!text) return reply(false, "請輸入要翻譯的內容");
+        // 選了中文卻打日文（或反過來）時自動修正方向
+        let from: Lang = msg.from === "ja" ? "ja" : "zh";
+        if (from === "zh" && looksJapanese(text)) from = "ja";
+        try {
+          const r = await translate(this.env, text, from);
+          const id = this.sql
+            .exec(
+              "INSERT INTO translations (ts, author, from_lang, source, result, reading) VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
+              Date.now(), user.name, from, text, r.translation, r.reading ?? null,
+            )
+            .one().id as number;
+          const item = this.sql.exec("SELECT * FROM translations WHERE id = ?", id).one();
+          // 全家共用紀錄：發問者用 reqId 對應自己的結果，其他人更新紀錄清單
+          this.broadcast({ type: "translation", reqId: msg.reqId ?? null, author: user.name, item, engine: r.engine });
+        } catch (e: any) {
+          return reply(false, `翻譯失敗：${e?.message ?? e}`);
+        }
+        break;
+      }
+      case "get_translations":
+        this.send(ws, { type: "translations", items: this.sql.exec("SELECT * FROM translations ORDER BY ts DESC LIMIT 60").toArray() });
+        return;
+      case "add_phrase": {
+        const zh = String(msg.zh ?? "").trim().slice(0, 200);
+        const category = String(msg.category ?? "⭐ 我的常用句").slice(0, 20);
+        if (!zh) return reply(false, "請輸入中文");
+        let ja = String(msg.ja ?? "").trim().slice(0, 400);
+        let kana = "";
+        if (!ja) {
+          try {
+            const r = await translate(this.env, zh, "zh");
+            ja = r.translation;
+            kana = r.reading ?? "";
+          } catch (e: any) {
+            return reply(false, `翻譯失敗：${e?.message ?? e}`);
+          }
+        }
+        this.sql.exec("INSERT INTO phrases (category, zh, ja, kana, author, ts) VALUES (?, ?, ?, ?, ?, ?)", category, zh, ja, kana, user.name, Date.now());
+        this.broadcastState();
+        break;
+      }
+      case "delete_phrase":
+        this.sql.exec("DELETE FROM phrases WHERE id = ?", Number(msg.id));
+        this.broadcastState();
+        break;
       case "reset": {
         // 管理員清除資料：測試結束正式使用前、或換一趟新行程時用。只清勾選的項目
         if (!user.admin) return reply(false, "只有管理員可以清除資料");
@@ -344,6 +411,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
           this.sql.exec("DELETE FROM messages");
           this.sql.exec("DELETE FROM photos");
           this.sql.exec("DELETE FROM locations");
+          this.sql.exec("DELETE FROM translations");
           this.setSetting("memory_cursor", "0");
           this.broadcast({ type: "cleared" });
           cleared.push("聊天紀錄");
@@ -468,9 +536,19 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     const words = String(keyword).split(/\s+/).filter(Boolean).slice(0, 4);
     if (!words.length) return [];
     const where = words.map(() => "text LIKE ?").join(" AND ");
-    return this.sql
-      .exec(`SELECT ts, author, text FROM messages WHERE ${where} ORDER BY ts DESC LIMIT ?`, ...words.map((w) => `%${w}%`), limit)
-      .toArray()
+    const likes = words.map((w) => `%${w}%`);
+    // 翻譯紀錄也一起搜（原文或譯文有關鍵字就算）
+    const tWhere = words.map(() => "(source LIKE ? OR result LIKE ?)").join(" AND ");
+    const tLikes = likes.flatMap((l) => [l, l]);
+    const rows = [
+      ...this.sql.exec(`SELECT ts, author, text FROM messages WHERE ${where} ORDER BY ts DESC LIMIT ?`, ...likes, limit).toArray(),
+      ...this.sql
+        .exec(`SELECT ts, author, '［翻譯］' || source || ' → ' || result AS text FROM translations WHERE ${tWhere} ORDER BY ts DESC LIMIT ?`, ...tLikes, limit)
+        .toArray(),
+    ];
+    return rows
+      .sort((a, b) => (b.ts as number) - (a.ts as number))
+      .slice(0, limit)
       .map((r) => ({
         time: new Date((r.ts as number) + 9 * 3600_000).toISOString().slice(0, 16).replace("T", " "),
         author: r.author as string,
@@ -587,6 +665,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       members: this.members(),
       summary: this.setting("summary"),
       gemini: this.limiter.usage(),
+      phrases: this.sql.exec("SELECT id, category, zh, ja, kana, author FROM phrases ORDER BY id").toArray(),
       locations: this.memberLocation(),
       trip: { title: TRIP.title, startDate: TRIP.startDate, endDate: TRIP.endDate, accommodation: TRIP.accommodation.name },
     };
@@ -653,6 +732,15 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       .map((l) => `- ${l.name}：${l.area ? `${l.area}附近` : "地名查詢中"}（${l.lat.toFixed(5)},${l.lon.toFixed(5)}，${Math.round((Date.now() - l.ts) / 60000)} 分鐘前）`)
       .join("\n");
     const summary = this.setting("summary");
+    const translations = this.sql
+      .exec("SELECT * FROM translations ORDER BY ts DESC LIMIT 8")
+      .toArray()
+      .reverse()
+      .map((r) => {
+        const t = new Date((r.ts as number) + 9 * 3600_000).toISOString().slice(5, 16).replace("T", " ");
+        return `- ${t} ${r.author}（${r.from_lang === "zh" ? "中→日" : "日→中"}）：「${String(r.source).slice(0, 120)}」→「${String(r.result).slice(0, 120)}」`;
+      })
+      .join("\n");
 
     return `你是「${AI_NAME}」，一個台灣家庭東京自由行群組裡的 AI 旅遊助理。群組裡的每位成員都看得到你的回答。
 
@@ -683,7 +771,7 @@ ${itin}
 
 # 長期記憶（成員偏好、決定、預訂…，#編號可用 forget 刪除）
 ${mems}
-${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以前聊過、和這次問題相關的內容（依時間排序）\n${recall}\n` : ""}${locs ? `\n# 成員最近位置\n${locs}\n` : ""}
+${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以前聊過、和這次問題相關的內容（依時間排序）\n${recall}\n` : ""}${locs ? `\n# 成員最近位置\n${locs}\n` : ""}${translations ? `\n# 最近在翻譯頁翻過的句子（成員問「剛剛跟店員說了什麼」時參考）\n${translations}\n` : ""}
 # 回答規則
 - 一律使用繁體中文與台灣用語，語氣親切，適合手機閱讀：精簡、條列、重點加粗，不要長篇大論。
 - 訊息開頭的［名字］代表是誰說的，回答時可以稱呼對方；但你的回答本身不要用［名字］開頭。
@@ -762,6 +850,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       const provider: Provider = providerFor(this.env, pid, gate);
       this.broadcast({ type: "ai_start", id, provider: provider.id, model: provider.model });
       let finalText = "";
+      let nudged = false;
       try {
         for (let step = 0; step < MAX_STEPS; step++) {
           const res = await provider.generate({
@@ -771,6 +860,18 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
             onDelta: (delta) => this.broadcast({ type: "ai_delta", id, delta }),
           });
           if (!res.calls.length) {
+            // 模型偶爾偷懶：說「圖片在下方」卻沒找圖、問附近卻沒查。提醒一次，重新回答
+            const need = requiredTool(trigger.text, toolsUsed);
+            if (need && !nudged && step < MAX_STEPS - 1) {
+              nudged = true;
+              this.broadcast({ type: "ai_reset", id });
+              turns = [
+                ...turns,
+                { role: "model", parts: [{ text: res.text || "（略）" }] },
+                { role: "user", parts: [{ text: `（系統提醒：你還沒有呼叫 ${need}，這個問題一定要先呼叫 ${need} 查詢，再根據結果重新回答。）` }] },
+              ];
+              continue;
+            }
             finalText = res.text;
             break;
           }

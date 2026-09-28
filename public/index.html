@@ -74,6 +74,7 @@
       <form id="send-form" class="send-row">
         <label class="icon" title="拍照／上傳照片">📷<input id="photo-input" type="file" accept="image/*" hidden /></label>
         <button type="button" id="loc-btn" class="icon" title="附上目前位置">📍</button>
+        <button type="button" id="tr-open" class="icon" title="中日翻譯">🈯</button>
         <textarea id="input" rows="1" placeholder="問旅伴 AI 任何事…" enterkeyhint="send"></textarea>
         <button type="submit" class="send" id="send-btn" title="送出">➤</button>
       </form>
@@ -90,5 +91,29 @@
   </dialog>
 
   <dialog id="viewer" class="viewer"><img id="viewer-img" alt="" /></dialog>
+
+  <!-- 中日翻譯 -->
+  <dialog id="translator" class="translator">
+    <div class="tr-head">
+      <button class="icon" id="tr-close" title="回到聊天">✕</button>
+      <div class="tr-tabs" id="tr-tabs">
+        <button data-tab="phrases">常用句</button>
+        <button data-tab="live">即時翻譯</button>
+        <button data-tab="history">紀錄</button>
+      </div>
+    </div>
+    <div id="tr-body" class="tr-body"></div>
+  </dialog>
+
+  <!-- 全螢幕給對方看 -->
+  <dialog id="showcase" class="showcase">
+    <div class="showcase-ja" id="showcase-ja"></div>
+    <div class="showcase-kana" id="showcase-kana"></div>
+    <div class="showcase-zh" id="showcase-zh"></div>
+    <div class="showcase-actions">
+      <button class="btn" id="showcase-speak">🔊 再念一次</button>
+      <button class="btn" id="showcase-close">關閉</button>
+    </div>
+  </dialog>
 </body>
 </html>

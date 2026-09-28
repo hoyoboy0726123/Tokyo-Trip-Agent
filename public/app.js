@@ -8,6 +8,8 @@ const els = {
   attach: $("#attach"), attachImg: $("#attach-img"), attachLoc: $("#attach-loc"), attachClear: $("#attach-clear"),
   panel: $("#panel"), panelTitle: $("#panel-title"), panelBody: $("#panel-body"), panelClose: $("#panel-close"),
   viewer: $("#viewer"), viewerImg: $("#viewer-img"),
+  translator: $("#translator"), trBody: $("#tr-body"), trTabs: $("#tr-tabs"),
+  showcase: $("#showcase"),
 };
 
 const S = {
@@ -163,6 +165,14 @@ function handle(m) {
     case "ai_retry":
       aiRetry(m);
       break;
+    case "ai_reset": {
+      const live = S.live.get(m.id);
+      if (live) {
+        live.text = "";
+        live.node.querySelector(".ai-text").innerHTML = `<span class="typing"><span></span><span></span><span></span></span>`;
+      }
+      break;
+    }
     case "ai_note": {
       const live = S.live.get(m.id);
       if (live) live.node.querySelector(".meta").textContent = m.text;
@@ -171,7 +181,15 @@ function handle(m) {
     case "ai_done":
       aiDone(m);
       break;
+    case "translation":
+      onTranslation(m);
+      break;
+    case "translations":
+      TR.history = m.items;
+      if (els.translator.open && TR.tab === "history") renderTranslator();
+      break;
     case "action_result":
+      if (m.action === "translate" || m.action === "add_phrase") trActionDone(m);
       if (!m.ok && m.error) alert(m.error);
       else if (m.ok && m.action === "reset") alert("已清除 ✅");
       break;
@@ -490,6 +508,13 @@ function stopAutoLocation() {
 
 function setState(state) {
   S.state = state;
+  // 常用句存一份在手機，沒網路也能打開、念出來
+  if (state.phrases) {
+    try {
+      localStorage.setItem("tta-phrases", JSON.stringify(state.phrases));
+    } catch {}
+    if (els.translator.open && TR.tab === "phrases") renderPhraseList();
+  }
   const now = jst(Date.now()).toISOString().slice(0, 10);
   const start = new Date(state.trip.startDate + "T00:00:00Z");
   const day = Math.floor((new Date(now + "T00:00:00Z") - start) / 86400e3) + 1;
@@ -720,6 +745,314 @@ function renderPanel() {
       break;
     }
   }
+}
+
+// ================= 中日翻譯 =================
+
+const TR = {
+  tab: "phrases",
+  from: "zh", // zh = 中→日, ja = 日→中
+  history: [],
+  result: null, // 最近一次自己的翻譯結果
+  busy: false,
+  adding: false,
+  rec: null,
+  reqId: null,
+};
+
+function phrasesData() {
+  if (S.state?.phrases) return S.state.phrases;
+  try {
+    return JSON.parse(localStorage.getItem("tta-phrases") || "[]");
+  } catch {
+    return [];
+  }
+}
+
+// ---------- 語音：念出來（瀏覽器內建，免費、離線也能用） ----------
+
+let voices = [];
+function loadVoices() {
+  voices = "speechSynthesis" in window ? speechSynthesis.getVoices() : [];
+}
+if ("speechSynthesis" in window) {
+  loadVoices();
+  speechSynthesis.addEventListener?.("voiceschanged", loadVoices);
+}
+
+function speak(text, lang = "ja") {
+  if (!("speechSynthesis" in window)) return alert("這個瀏覽器不支援朗讀");
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(String(text).replace(/\n+/g, "、"));
+  u.lang = lang === "ja" ? "ja-JP" : "zh-TW";
+  u.rate = lang === "ja" ? 0.9 : 1;
+  const v = voices.find((x) => x.lang.replace("_", "-").startsWith(lang === "ja" ? "ja" : "zh-TW")) ?? voices.find((x) => x.lang.startsWith(lang));
+  if (v) u.voice = v;
+  speechSynthesis.speak(u);
+}
+
+// ---------- 全螢幕給對方看 ----------
+
+let showcaseItem = null;
+function showBig(item) {
+  showcaseItem = item;
+  $("#showcase-ja").textContent = item.ja;
+  $("#showcase-kana").textContent = item.kana || "";
+  $("#showcase-zh").textContent = item.zh || "";
+  if (!els.showcase.open) els.showcase.showModal();
+}
+$("#showcase-speak").addEventListener("click", () => showcaseItem && speak(showcaseItem.ja, "ja"));
+$("#showcase-close").addEventListener("click", () => els.showcase.close());
+
+// ---------- 開關與分頁 ----------
+
+$("#tr-open").addEventListener("click", () => {
+  renderTranslator();
+  if (!els.translator.open) els.translator.showModal();
+});
+$("#tr-close").addEventListener("click", () => {
+  TR.rec?.stop();
+  els.translator.close();
+});
+els.trTabs.querySelectorAll("button").forEach((b) =>
+  b.addEventListener("click", () => {
+    TR.rec?.stop();
+    TR.tab = b.dataset.tab;
+    if (TR.tab === "history" && S.ws?.readyState === 1) S.ws.send(JSON.stringify({ type: "action", action: "get_translations" }));
+    renderTranslator();
+  }),
+);
+
+function renderTranslator() {
+  els.trTabs.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.tab === TR.tab));
+  const b = els.trBody;
+  if (TR.tab === "phrases") {
+    const cats = [...new Set(phrasesData().map((p) => p.category))];
+    if (!cats.includes("⭐ 我的常用句")) cats.push("⭐ 我的常用句");
+    b.innerHTML = `
+      <p class="small muted">點一下就用日文念出來；📺 放大給司機、店員看。全家共用，沒網路也能用。</p>
+      <div id="ph-list"></div>
+      <div class="card"><h3>➕ 新增常用句</h3>
+        <form class="form" id="ph-form">
+          <input name="zh" placeholder="輸入中文，例如：請問有推薦的菜嗎？" required />
+          <div class="row">
+            <select name="category">${cats.map((c) => `<option>${escapeHtml(c)}</option>`).join("")}</select>
+            <button class="btn primary-sm" id="ph-add">${TR.adding ? "翻譯中…" : "新增（自動翻成日文）"}</button>
+          </div>
+        </form>
+      </div>`;
+    renderPhraseList();
+    b.querySelector("#ph-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      TR.adding = true;
+      e.target.querySelector("#ph-add").textContent = "翻譯中…";
+      if (!wsSend({ type: "action", action: "add_phrase", zh: f.get("zh"), category: f.get("category") })) TR.adding = false;
+      e.target.reset();
+    });
+  } else if (TR.tab === "live") {
+    renderLive();
+  } else {
+    b.innerHTML = TR.history.length
+      ? `<p class="small muted">全家的翻譯紀錄，點一下再念一次。AI 也看得到這些紀錄。</p>` +
+        TR.history
+          .map((t, i) => {
+            const ja = t.from_lang === "zh" ? t.result : t.source;
+            return `<div class="card tr-item" data-i="${i}">
+              <div class="small muted">${escapeHtml(t.author)}｜${dayText(t.ts)} ${timeText(t.ts)}｜${t.from_lang === "zh" ? "中→日" : "日→中"}</div>
+              <div>${escapeHtml(t.source)}</div>
+              <div class="tr-out">${escapeHtml(t.result)}</div>
+              <div class="row"><button class="btn small" data-speak="${i}">🔊</button><button class="btn small" data-show="${i}">📺</button></div>
+            </div>`;
+          })
+          .join("")
+      : `<div class="card small muted">還沒有翻譯紀錄</div>`;
+    const item = (i) => {
+      const t = TR.history[i];
+      return t.from_lang === "zh" ? { ja: t.result, kana: t.reading, zh: t.source } : { ja: t.source, zh: t.result };
+    };
+    b.querySelectorAll("[data-speak]").forEach((x) => x.addEventListener("click", () => speak(item(x.dataset.speak).ja, "ja")));
+    b.querySelectorAll("[data-show]").forEach((x) => x.addEventListener("click", () => showBig(item(x.dataset.show))));
+  }
+}
+
+function renderPhraseList() {
+  const list = $("#ph-list");
+  if (!list) return;
+  const phrases = phrasesData();
+  const cats = [...new Set(phrases.map((p) => p.category))];
+  list.innerHTML = cats
+    .map(
+      (c) => `<h3 class="ph-cat">${escapeHtml(c)}</h3><div class="ph-grid">${phrases
+        .filter((p) => p.category === c)
+        .map(
+          (p) => `<div class="phrase" data-id="${p.id}">
+            <div class="ph-zh">${escapeHtml(p.zh)}</div>
+            <div class="ph-ja">${escapeHtml(p.ja)}</div>
+            ${p.kana ? `<div class="ph-kana">${escapeHtml(p.kana)}</div>` : ""}
+            <div class="ph-actions">
+              <button class="btn small" data-show>📺 給對方看</button>
+              <button class="btn small danger" data-del title="刪除">✕</button>
+            </div>
+          </div>`,
+        )
+        .join("")}</div>`,
+    )
+    .join("");
+  list.querySelectorAll(".phrase").forEach((el) => {
+    const p = phrases.find((x) => String(x.id) === el.dataset.id);
+    el.addEventListener("click", () => {
+      speak(p.ja, "ja");
+      el.classList.add("speaking");
+      setTimeout(() => el.classList.remove("speaking"), 1200);
+    });
+    el.querySelector("[data-show]").addEventListener("click", (e) => {
+      e.stopPropagation();
+      showBig(p);
+      speak(p.ja, "ja");
+    });
+    el.querySelector("[data-del]").addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (confirm(`刪除「${p.zh}」？（全家都會刪除）`)) wsSend({ type: "action", action: "delete_phrase", id: p.id });
+    });
+  });
+}
+
+// ---------- 即時翻譯 ----------
+
+function renderLive() {
+  const b = els.trBody;
+  const zh = TR.from === "zh";
+  const r = TR.result;
+  b.innerHTML = `
+    <div class="tr-dir">
+      <button data-from="zh" class="${zh ? "active" : ""}">中文 → 日文</button>
+      <button data-from="ja" class="${zh ? "" : "active"}">日文 → 中文</button>
+    </div>
+    <textarea id="tr-input" rows="4" placeholder="${zh ? "輸入或按 🎤 說中文" : "請對方輸入或按 🎤 說日文（日本語でどうぞ）"}"></textarea>
+    <div class="row tr-controls">
+      <button class="btn tr-mic" id="tr-mic">🎤 ${zh ? "說中文" : "日本語で話す"}</button>
+      <button class="btn primary-sm tr-go" id="tr-go">${TR.busy ? "翻譯中…" : "翻譯"}</button>
+    </div>
+    ${
+      r
+        ? `<div class="card tr-result">
+            <div class="small muted">${escapeHtml(r.source)}</div>
+            <div class="tr-out big-text">${escapeHtml(r.result)}</div>
+            ${r.reading ? `<div class="ph-kana">${escapeHtml(r.reading)}</div>` : ""}
+            <div class="row tr-actions">
+              <button class="btn" id="tr-speak">🔊 念出來</button>
+              <button class="btn" id="tr-show">📺 給對方看</button>
+              <button class="btn" id="tr-copy">📋 複製</button>
+              <button class="btn" id="tr-swap">↔ 換對方說</button>
+            </div>
+          </div>`
+        : `<p class="small muted">說完或打完按「翻譯」。語音輸入說完會自動翻譯。</p>`
+    }`;
+  b.querySelectorAll("[data-from]").forEach((x) =>
+    x.addEventListener("click", () => {
+      TR.rec?.stop();
+      TR.from = x.dataset.from;
+      renderLive();
+    }),
+  );
+  $("#tr-mic").addEventListener("click", toggleMic);
+  $("#tr-go").addEventListener("click", doTranslate);
+  updateMic();
+  if (r) {
+    const ja = r.from_lang === "zh" ? r.result : r.source;
+    $("#tr-speak").addEventListener("click", () => speak(r.result, r.from_lang === "zh" ? "ja" : "zh"));
+    $("#tr-show").addEventListener("click", () => showBig(r.from_lang === "zh" ? { ja, kana: r.reading, zh: r.source } : { ja, zh: r.result }));
+    $("#tr-copy").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(r.result);
+        $("#tr-copy").textContent = "✅ 已複製";
+      } catch {}
+    });
+    $("#tr-swap").addEventListener("click", () => {
+      TR.from = TR.from === "zh" ? "ja" : "zh";
+      renderLive();
+      toggleMic();
+    });
+  }
+}
+
+function doTranslate() {
+  const input = $("#tr-input");
+  const text = input?.value.trim();
+  if (!text || TR.busy) return;
+  TR.reqId = Math.random().toString(36).slice(2);
+  if (!wsSend({ type: "action", action: "translate", text, from: TR.from, reqId: TR.reqId })) return;
+  TR.busy = true;
+  $("#tr-go").textContent = "翻譯中…";
+}
+
+function onTranslation(m) {
+  TR.history.unshift(m.item);
+  if (m.reqId && m.reqId === TR.reqId) {
+    TR.busy = false;
+    TR.result = m.item;
+    if (els.translator.open && TR.tab === "live") {
+      renderLive();
+      // 中→日：翻好直接念給對方聽
+      if (m.item.from_lang === "zh") speak(m.item.result, "ja");
+    }
+  } else if (els.translator.open && TR.tab === "history") {
+    renderTranslator();
+  }
+}
+
+function trActionDone(m) {
+  if (m.action === "translate" && !m.ok) {
+    TR.busy = false;
+    if ($("#tr-go")) $("#tr-go").textContent = "翻譯";
+  }
+  if (m.action === "add_phrase") {
+    TR.adding = false;
+    if ($("#ph-add")) $("#ph-add").textContent = "新增（自動翻成日文）";
+  }
+}
+
+// ---------- 語音輸入（瀏覽器內建） ----------
+
+function updateMic() {
+  const btn = $("#tr-mic");
+  if (!btn) return;
+  btn.classList.toggle("listening", !!TR.rec);
+  btn.textContent = TR.rec ? "⏹ 說完了" : `🎤 ${TR.from === "zh" ? "說中文" : "日本語で話す"}`;
+}
+
+function toggleMic() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return alert("這個瀏覽器不支援語音輸入，可以改用手機鍵盤上的 🎤 聽寫。");
+  if (TR.rec) return TR.rec.stop();
+  const input = $("#tr-input");
+  const base = input.value.trim() ? input.value.trim() + " " : "";
+  const rec = new SR();
+  rec.lang = TR.from === "zh" ? "zh-TW" : "ja-JP";
+  rec.interimResults = true;
+  rec.continuous = false;
+  rec.onresult = (e) => {
+    let t = "";
+    for (const r of e.results) t += r[0].transcript;
+    input.value = base + t;
+  };
+  rec.onerror = (e) => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") alert("請允許這個網站使用麥克風");
+  };
+  rec.onend = () => {
+    TR.rec = null;
+    updateMic();
+    // 說完自動翻譯
+    if (input.value.trim() && input.value.trim() !== base.trim()) doTranslate();
+  };
+  TR.rec = rec;
+  try {
+    rec.start();
+  } catch {
+    TR.rec = null;
+  }
+  updateMic();
 }
 
 checkSession();
