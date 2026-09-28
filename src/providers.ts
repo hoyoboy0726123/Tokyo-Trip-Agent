@@ -89,7 +89,7 @@ export function geminiProvider(env: Env, model?: string): Provider {
 // ---------------- Cloudflare Workers AI ----------------
 
 export function workersAIProvider(env: Env, model?: string): Provider {
-  const m = model || env.WORKERS_AI_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+  const m = model || env.WORKERS_AI_MODEL || "@cf/google/gemma-4-26b-a4b-it";
   return {
     id: "workers-ai",
     model: m,
