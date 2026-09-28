@@ -148,8 +148,12 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     if (!cleanName) return Response.json({ ok: false, error: "請輸入暱稱" }, { status: 400 });
     if (cleanName === AI_NAME) return Response.json({ ok: false, error: "這個名字保留給 AI" }, { status: 400 });
 
-    const admin = !!this.env.ADMIN_PASSWORD && safeEqual(password, this.env.ADMIN_PASSWORD);
-    const member = admin || (!!this.env.ROOM_PASSWORD && safeEqual(password, this.env.ROOM_PASSWORD));
+    // Windows 用管線設定 secret 會多帶換行，比對前一律去掉前後空白
+    const adminPw = (this.env.ADMIN_PASSWORD ?? "").trim();
+    const roomPw = (this.env.ROOM_PASSWORD ?? "").trim();
+    const pw = password.trim();
+    const admin = !!adminPw && safeEqual(pw, adminPw);
+    const member = admin || (!!roomPw && safeEqual(pw, roomPw));
     if (!member) {
       this.sql.exec(
         "INSERT INTO login_attempts VALUES (?, ?, ?) ON CONFLICT(ip) DO UPDATE SET count = ?, ts = ?",
@@ -569,7 +573,7 @@ ${mems}
 ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${locs ? `\n# 成員最近位置\n${locs}\n` : ""}
 # 回答規則
 - 一律使用繁體中文與台灣用語，語氣親切，適合手機閱讀：精簡、條列、重點加粗，不要長篇大論。
-- 訊息開頭的［名字］代表是誰說的，回答時可以稱呼對方。
+- 訊息開頭的［名字］代表是誰說的，回答時可以稱呼對方；但你的回答本身不要用［名字］開頭。
 - 營業時間、票價、活動、交通、天氣、排隊等「會變動的資訊」一定要用工具查，並附上來源連結；查不到就說不確定，絕不編造。
 - 工具回傳 error 代表失敗：要如實告訴成員沒有完成，不可以說已完成。記帳前確認分攤對象是否符合成員說的人數。
 - 提到日圓價格時附上約合台幣（用 convert_currency）。
@@ -614,7 +618,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${locs ? `\n# 成員�
     const id = newId();
     const settings = this.settings();
     const primary = settings.provider === "workers-ai" || !settings.hasGemini ? "workers-ai" : "gemini";
-    const order = primary === "gemini" ? ["gemini", "workers-ai"] : settings.hasGemini ? ["workers-ai", "gemini"] : ["workers-ai"];
+    const order = primary === "gemini" ? ["gemini", "gemini-backup", "workers-ai"] : settings.hasGemini ? ["workers-ai", "gemini", "gemini-backup"] : ["workers-ai"];
 
     let image: Part | null = null;
     if (trigger.photo_id) {

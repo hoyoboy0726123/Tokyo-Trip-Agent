@@ -29,13 +29,21 @@ export function geminiProvider(env: Env, model?: string): Provider {
       if (tools?.length) body.tools = [{ functionDeclarations: tools }];
 
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:streamGenerateContent?alt=sse`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok || !res.body) {
-        throw new Error(`Gemini ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      // 503/429 多半是 Google 端暫時塞車，稍等重試通常就好
+      let res: Response | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt) await new Promise((r) => setTimeout(r, attempt * 1500));
+        res = await fetch(url, {
+          method: "POST",
+          // 串流卡住時整段放棄，改用備援模型，避免聊天室一直顯示「思考中」
+          signal: AbortSignal.timeout(45_000),
+          headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY.trim() },
+          body: JSON.stringify(body),
+        });
+        if (res.ok || ![429, 500, 503].includes(res.status)) break;
+      }
+      if (!res || !res.ok || !res.body) {
+        throw new Error(`Gemini ${res?.status}: ${((await res?.text()) ?? "").slice(0, 300)}`);
       }
 
       const result: GenerateResult = { text: "", calls: [] };
@@ -81,7 +89,7 @@ export function geminiProvider(env: Env, model?: string): Provider {
 // ---------------- Cloudflare Workers AI ----------------
 
 export function workersAIProvider(env: Env, model?: string): Provider {
-  const m = model || env.WORKERS_AI_MODEL || "@cf/meta/llama-4-scout-17b-16e-instruct";
+  const m = model || env.WORKERS_AI_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
   return {
     id: "workers-ai",
     model: m,
@@ -133,6 +141,9 @@ export function workersAIProvider(env: Env, model?: string): Provider {
   };
 }
 
+/** gemini = 主要模型；gemini-backup = 主要模型塞車時的備援 */
 export function providerFor(env: Env, id: string): Provider {
-  return id === "workers-ai" ? workersAIProvider(env) : geminiProvider(env);
+  if (id === "workers-ai") return workersAIProvider(env);
+  if (id === "gemini-backup") return geminiProvider(env, env.GEMINI_BACKUP_MODEL || "gemini-3.1-flash-lite");
+  return geminiProvider(env);
 }

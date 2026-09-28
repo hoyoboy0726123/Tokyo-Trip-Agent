@@ -15,7 +15,8 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TripRoom"] }],
   "vars": {
     "GEMINI_MODEL": "gemini-3.5-flash-lite",
-    "WORKERS_AI_MODEL": "@cf/meta/llama-4-scout-17b-16e-instruct",
+    "GEMINI_BACKUP_MODEL": "gemini-3.1-flash-lite",
+    "WORKERS_AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
     "DEFAULT_PROVIDER": "gemini"
   },
   "observability": { "enabled": true }

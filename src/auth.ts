@@ -20,7 +20,7 @@ function fromB64url(s: string): string {
 /** 沒設 SESSION_SECRET 時由兩組密碼推導；改密碼 = 所有人重新登入 */
 async function secret(env: Env): Promise<string> {
   if (env.SESSION_SECRET) return env.SESSION_SECRET;
-  const digest = await crypto.subtle.digest("SHA-256", enc.encode(`tta|${env.ROOM_PASSWORD}|${env.ADMIN_PASSWORD}`));
+  const digest = await crypto.subtle.digest("SHA-256", enc.encode(`tta|${(env.ROOM_PASSWORD ?? "").trim()}|${(env.ADMIN_PASSWORD ?? "").trim()}`));
   return b64url(new Uint8Array(digest));
 }
 

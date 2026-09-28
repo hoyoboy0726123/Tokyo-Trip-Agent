@@ -171,7 +171,7 @@ export const TOOLS: Tool[] = [
       if (!env.TAVILY_API_KEY) return { error: "尚未設定 TAVILY_API_KEY，無法搜尋網路" };
       const res = await fetch("https://api.tavily.com/search", {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${env.TAVILY_API_KEY}` },
+        headers: { "content-type": "application/json", authorization: `Bearer ${env.TAVILY_API_KEY.trim()}` },
         body: JSON.stringify({ query: args.query, max_results: Math.min(Number(args.max_results) || 5, 8), include_answer: "basic", search_depth: "basic" }),
       });
       if (!res.ok) return { error: `搜尋失敗 ${res.status}` };
@@ -193,7 +193,7 @@ export const TOOLS: Tool[] = [
       if (!env.TAVILY_API_KEY) return { error: "尚未設定 TAVILY_API_KEY" };
       const res = await fetch("https://api.tavily.com/extract", {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${env.TAVILY_API_KEY}` },
+        headers: { "content-type": "application/json", authorization: `Bearer ${env.TAVILY_API_KEY.trim()}` },
         body: JSON.stringify({ urls: [args.url] }),
       });
       if (!res.ok) return { error: `讀取失敗 ${res.status}` };
