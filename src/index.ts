@@ -1,4 +1,4 @@
-import { clearSessionCookie, createSessionCookie, readSession } from "./auth";
+import { clearSessionCookie, createSessionCookie, readSession, safeEqual, sign } from "./auth";
 import type { Env } from "./types";
 
 export { TripRoom } from "./room";
@@ -40,6 +40,29 @@ export default {
       headers.set("x-user-admin", user.admin ? "1" : "0");
 
       if (path === "/api/me") return json({ ok: true, user });
+
+      // 網路圖片轉送：避免原網站擋外連；網址由 find_images 簽章，不能當成公開代理使用
+      if (path === "/api/img" && req.method === "GET") {
+        const target = url.searchParams.get("u") ?? "";
+        const sig = url.searchParams.get("s") ?? "";
+        if (!/^https?:\/\//.test(target) || !safeEqual(sig, await sign(env, "img:" + target))) {
+          return new Response("Forbidden", { status: 403 });
+        }
+        try {
+          const res = await fetch(target, {
+            headers: { "user-agent": "Mozilla/5.0 (compatible; TokyoTripAgent/1.0)", accept: "image/*" },
+            signal: AbortSignal.timeout(15_000),
+          });
+          const type = res.headers.get("content-type") ?? "";
+          if (!res.ok || !type.startsWith("image/") || Number(res.headers.get("content-length") || 0) > 5_000_000) {
+            await res.body?.cancel();
+            return new Response("Image unavailable", { status: 502 });
+          }
+          return new Response(res.body, { headers: { "content-type": type, "cache-control": "private, max-age=86400" } });
+        } catch {
+          return new Response("Image unavailable", { status: 502 });
+        }
+      }
 
       if (path === "/ws") {
         if (req.headers.get("Upgrade") !== "websocket") return new Response("Expected WebSocket", { status: 426 });

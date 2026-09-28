@@ -1,10 +1,11 @@
+import { sign } from "./auth";
 import type { Env, ToolDecl } from "./types";
 import { TRIP } from "./trip-data";
 
 /** 工具可以用到的聊天室功能（由 TripRoom 實作） */
 export interface RoomApi {
   members(): string[];
-  memberLocation(name?: string): { name: string; lat: number; lon: number; accuracy: number | null; ts: number }[];
+  memberLocation(name?: string): { name: string; lat: number; lon: number; accuracy: number | null; ts: number; area: string | null }[];
   addMemory(content: string, category: string, author: string): number;
   deleteMemory(id: number): boolean;
   searchHistory(keyword: string, limit: number): { ts: number; author: string; text: string }[];
@@ -29,10 +30,19 @@ export interface ExpenseInput {
   author: string;
 }
 
+export interface AttachedImage {
+  src: string; // 經過本站轉送的網址
+  caption: string;
+  source: string; // 圖片所在網站
+  page?: string; // 來源網頁
+}
+
 export interface ToolContext {
   env: Env;
   room: RoomApi;
   author: string;
+  /** 工具找到的圖片，會附在這次 AI 回答下方 */
+  attachImage?: (img: AttachedImage) => void;
 }
 
 type Executor = (args: any, ctx: ToolContext) => Promise<unknown>;
@@ -45,8 +55,12 @@ interface Tool {
 
 const UA = "TokyoTripAgent/1.0 (family travel assistant)";
 
-async function getJSON(url: string, init?: RequestInit): Promise<any> {
-  const res = await fetch(url, { ...init, headers: { "user-agent": UA, accept: "application/json", ...(init?.headers ?? {}) } });
+async function getJSON(url: string, init?: RequestInit, timeoutMs = 15_000): Promise<any> {
+  const res = await fetch(url, {
+    ...init,
+    signal: AbortSignal.timeout(timeoutMs),
+    headers: { "user-agent": UA, accept: "application/json", ...(init?.headers ?? {}) },
+  });
   if (!res.ok) throw new Error(`${new URL(url).host} 回應 ${res.status}`);
   return res.json();
 }
@@ -156,6 +170,31 @@ async function locate(place: string): Promise<{ name: string; lat: number; lon: 
   }
 }
 
+/** 座標 → 人看得懂的地名（例如「新北市板橋區館前西路」），給 AI 用，避免它自己猜 */
+export async function reverseArea(lat: number, lon: number): Promise<string> {
+  const g = await getJSON(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&accept-language=zh-TW,ja&zoom=17`, undefined, 8_000);
+  const a = g.address ?? {};
+  const parts = [a.state, a.city || a.county, a.town || a.city_district || a.suburb, a.quarter || a.neighbourhood, a.road].filter(Boolean);
+  return [...new Set(parts)].join("") || g.display_name || "";
+}
+
+const IMG_UA = "Mozilla/5.0 (compatible; TokyoTripAgent/1.0)";
+const IMG_MAX_BYTES = 1_500_000;
+
+/** 圖片能不能顯示：200、真的是圖片、不要太大（手機流量） */
+async function imageUsable(url: string): Promise<boolean> {
+  try {
+    if (!/^https?:\/\//.test(url)) return false;
+    const res = await fetch(url, { headers: { "user-agent": IMG_UA, accept: "image/*" }, signal: AbortSignal.timeout(6_000) });
+    const type = res.headers.get("content-type") ?? "";
+    const size = Number(res.headers.get("content-length") || 0);
+    await res.body?.cancel();
+    return res.ok && type.startsWith("image/") && (!size || size <= IMG_MAX_BYTES);
+  } catch {
+    return false;
+  }
+}
+
 /** 發問者 3 小時內分享過的位置（沒有就用其他成員的） */
 function recentLocation(room: RoomApi, author: string) {
   const fresh = (l?: { ts: number }) => !!l && Date.now() - l.ts < 3 * 3600_000;
@@ -165,12 +204,17 @@ function recentLocation(room: RoomApi, author: string) {
   return fresh(other) ? other : null;
 }
 
-async function overpass(query: string): Promise<any> {
+/** quick：附加資訊用（例如最近車站），只試主站、最多 12 秒，查不到就算了 */
+async function overpass(query: string, quick = false): Promise<any> {
   const body = "data=" + encodeURIComponent(query);
   let lastError: unknown;
-  for (const url of ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]) {
+  // 主站從 Cloudflare 連線約需 10 秒；備援站常逾時，只給較短的時間
+  const servers: (readonly [string, number])[] = quick
+    ? [["https://overpass-api.de/api/interpreter", 12_000]]
+    : [["https://overpass-api.de/api/interpreter", 25_000], ["https://overpass.kumi.systems/api/interpreter", 10_000]];
+  for (const [url, timeout] of servers) {
     try {
-      return await getJSON(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body });
+      return await getJSON(url, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body }, timeout);
     } catch (e) {
       lastError = e;
     }
@@ -260,6 +304,62 @@ export const TOOLS: Tool[] = [
       const d: any = await res.json();
       const r = d.results?.[0];
       return r ? { url: r.url, content: String(r.raw_content ?? "").slice(0, 8000) } : { error: "無法讀取這個網頁" };
+    },
+  },
+  {
+    label: "🖼 找圖片",
+    decl: {
+      name: "find_images",
+      description: "上網找照片（餐廳外觀、料理、景點、商品），找到的圖片會自動顯示在你的回答下方。只有成員明確要求看照片／圖片時才使用。",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "搜尋關鍵字，用日文或英文並加上地名，例如「一風堂 池袋 ラーメン」「亀有 両津勘吉 銅像」" },
+          count: { type: "integer", description: "要幾張，預設 4，最多 6" },
+        },
+        required: ["query"],
+      },
+    },
+    async run(args, { env, attachImage }) {
+      if (!env.TAVILY_API_KEY) return { error: "尚未設定 TAVILY_API_KEY，無法找圖片" };
+      const res = await fetch("https://api.tavily.com/search", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${env.TAVILY_API_KEY.trim()}` },
+        body: JSON.stringify({ query: args.query, max_results: 5, include_images: true, include_image_descriptions: true, search_depth: "basic" }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!res.ok) return { error: `找圖片失敗 ${res.status}` };
+      const d: any = await res.json();
+
+      const seen = new Set<string>();
+      const candidates: { url: string; description: string; page?: string }[] = [];
+      const add = (img: any, page?: string) => {
+        const url = typeof img === "string" ? img : img?.url;
+        if (!url || seen.has(url)) return;
+        seen.add(url);
+        candidates.push({ url, description: typeof img === "string" ? "" : String(img.description ?? ""), page });
+      };
+      for (const img of d.images ?? []) add(img);
+      for (const r of d.results ?? []) for (const img of r.images ?? []) add(img, r.url);
+
+      // 約三成圖片會擋外連、不是圖片或太大，先檢查再給
+      const checked = await Promise.all(candidates.slice(0, 12).map(async (c) => ((await imageUsable(c.url)) ? c : null)));
+      const count = Math.min(Math.max(Number(args.count) || 4, 1), 6);
+      const picked = checked.filter((c): c is NonNullable<typeof c> => !!c).slice(0, count);
+      for (const p of picked) {
+        attachImage?.({
+          src: `/api/img?u=${encodeURIComponent(p.url)}&s=${await sign(env, "img:" + p.url)}`,
+          caption: p.description.slice(0, 120),
+          source: new URL(p.url).host,
+          page: p.page,
+        });
+      }
+      if (!picked.length) return { found: 0, note: "找不到可以顯示的圖片，可以換個關鍵字（日文或英文）再試" };
+      return {
+        found: picked.length,
+        images: picked.map((p, i) => ({ no: i + 1, description: p.description, source: new URL(p.url).host })),
+        note: "圖片已自動顯示在回答下方，文字裡不要貼圖片網址；可依描述簡單說明每張圖，並提醒是網路圖片、不一定是同一家分店，僅供參考",
+      };
     },
   },
   {
@@ -360,16 +460,16 @@ export const TOOLS: Tool[] = [
       if (!locs.length) return { error: "還沒有人分享位置。請按輸入框旁的 📍 分享位置。" };
       const out = [];
       for (const l of locs.slice(0, 4)) {
-        let address = "", area = "";
-        try {
-          const g = await getJSON(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${l.lat}&lon=${l.lon}&accept-language=ja&zoom=18`);
-          address = g.display_name ?? "";
-          const a = g.address ?? {};
-          area = [a.city || a.town, a.city_district || a.suburb, a.quarter || a.neighbourhood].filter(Boolean).join(" ");
-        } catch {}
+        let area = l.area ?? "";
+        if (!area) {
+          try {
+            area = await reverseArea(l.lat, l.lon);
+          } catch {}
+        }
         let nearestStation: { name: string; distance_m: number; walk_min: number } | null = null;
         try {
-          const d = await overpass(`[out:json][timeout:15];nwr(around:1500,${l.lat},${l.lon})["railway"="station"];out center 30;`);
+          // 只查車站的點（node），比 nwr 快很多
+          const d = await overpass(`[out:json][timeout:10];node(around:1200,${l.lat},${l.lon})["railway"="station"];out 20;`, true);
           const s = (d.elements ?? [])
             .map((e: any) => ({ name: e.tags?.name, distance_m: distanceM(l.lat, l.lon, e.lat ?? e.center?.lat, e.lon ?? e.center?.lon) }))
             .filter((x: any) => x.name)
@@ -379,7 +479,7 @@ export const TOOLS: Tool[] = [
         out.push({
           name: l.name, lat: l.lat, lon: l.lon, accuracy_m: l.accuracy,
           minutes_ago: Math.round((Date.now() - l.ts) / 60000),
-          area, nearest_station: nearestStation, address, map: mapsLink(l),
+          area, nearest_station: nearestStation, map: mapsLink(l),
         });
       }
       return out;
@@ -405,12 +505,18 @@ export const TOOLS: Tool[] = [
       const mine = recentLocation(room, author);
       let center: { lat: number; lon: number; label: string } | null = null;
       let note = "";
-      if (args.near) {
-        const g = await locate(String(args.near));
+      // AI 常把發問者自己的地名填進 near，這時直接用 GPS 比較準
+      const near = String(args.near ?? "").trim();
+      const isMyArea = !!near && !!mine?.area && (mine.area.includes(near) || near.includes(mine.area));
+      if (near && !isMyArea) {
+        const g = await locate(near);
         if (g) center = { lat: g.lat, lon: g.lon, label: COORD_RE.test(String(args.near)) ? "指定座標" : g.name };
         else note = `找不到「${args.near}」這個地點，改用${mine ? "發問者目前位置" : "住宿"}為中心`;
       }
-      if (!center && mine) center = { lat: mine.lat, lon: mine.lon, label: `${mine.name} 的 GPS 位置（${Math.round((Date.now() - mine.ts) / 60000)} 分鐘前）` };
+      if (!center && mine) {
+        const where = mine.area ? `：${mine.area}` : "";
+        center = { lat: mine.lat, lon: mine.lon, label: `${mine.name} 的 GPS 位置${where}（${Math.round((Date.now() - mine.ts) / 60000)} 分鐘前）` };
+      }
       if (!center) {
         center = { lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon, label: "住宿（要町）" };
         note ||= "沒有成員分享位置，先以住宿為中心；要找自己附近請先按 📍 分享位置";
@@ -665,10 +771,15 @@ export function toolLabel(name: string): string {
 export async function runTool(name: string, args: any, ctx: ToolContext): Promise<unknown> {
   const tool = TOOLS.find((t) => t.decl.name === name);
   if (!tool) return { error: `沒有這個工具：${name}` };
+  const t0 = Date.now();
   try {
     return await tool.run(args ?? {}, ctx);
   } catch (e: any) {
     console.error(`tool ${name} failed`, JSON.stringify(args), e?.message ?? e);
     return { error: String(e?.message ?? e) };
+  } finally {
+    // 慢的工具記下來，之後才知道要優化哪裡
+    const ms = Date.now() - t0;
+    if (ms > 5_000) console.log(`tool ${name} slow ${ms}ms`);
   }
 }

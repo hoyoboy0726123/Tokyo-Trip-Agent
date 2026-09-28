@@ -24,7 +24,7 @@ async function secret(env: Env): Promise<string> {
   return b64url(new Uint8Array(digest));
 }
 
-async function sign(env: Env, data: string): Promise<string> {
+export async function sign(env: Env, data: string): Promise<string> {
   const key = await crypto.subtle.importKey("raw", enc.encode(await secret(env)), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return b64url(new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(data))));
 }

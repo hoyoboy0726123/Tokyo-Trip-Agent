@@ -194,6 +194,18 @@ function messageNode(msg) {
     body += `<div class="loc-card">📍 <a href="${url}" target="_blank" rel="noopener">分享了目前位置</a></div>`;
   }
   if (msg.text) body += isAI ? md(msg.text) : escapeHtml(msg.text).replace(/\n/g, "<br>");
+  const images = (msg.meta?.images ?? []).filter((im) => typeof im.src === "string" && im.src.startsWith("/api/img?"));
+  if (images.length) {
+    body += `<div class="gallery">${images
+      .map((im) => {
+        const link = /^https?:\/\//.test(im.page ?? "") ? im.page : null;
+        return `<figure>
+          <img class="photo web" src="${escapeHtml(im.src)}" loading="lazy" alt="${escapeHtml(im.caption)}" onerror="this.closest('figure').remove()" />
+          <figcaption>${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener">${escapeHtml(im.source)}</a>` : escapeHtml(im.source)}</figcaption>
+        </figure>`;
+      })
+      .join("")}</div><div class="small muted">🖼 網路圖片，僅供參考</div>`;
+  }
   const tools = msg.meta?.tools?.length ? msg.meta.tools.map((t) => `<span class="tool-chip">${escapeHtml(t)}</span>`).join("") : "";
   const provider = isAI && msg.meta?.provider ? (msg.meta.provider === "gemini" ? "Gemini" : "Workers AI") : "";
   node.innerHTML = `${isMe ? "" : avatar}

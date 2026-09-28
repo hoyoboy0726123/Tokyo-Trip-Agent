@@ -91,6 +91,11 @@ input, textarea, select { font: inherit; color: inherit; }
 .bubble code { background: rgba(127,127,127,.15); padding: 1px 4px; border-radius: 4px; font-size: .9em; }
 .bubble img.photo { display: block; max-width: 100%; max-height: 280px; border-radius: 12px; margin: 2px 0 6px; cursor: zoom-in; }
 .loc-card { display: inline-flex; gap: 6px; align-items: center; font-size: 14px; }
+.gallery { display: flex; gap: 8px; overflow-x: auto; margin: 8px 0 4px; padding-bottom: 4px; scroll-snap-type: x mandatory; }
+.gallery figure { flex: none; width: 150px; margin: 0; scroll-snap-align: start; }
+.bubble .gallery img.photo.web { width: 150px; height: 112px; max-height: none; object-fit: cover; margin: 0; border-radius: 10px; background: var(--line); }
+.gallery figcaption { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+.gallery figcaption a { color: var(--muted); }
 .meta { font-size: 11px; color: var(--muted); padding: 0 4px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .tool-chip { background: var(--red-soft); color: var(--red); border-radius: 999px; padding: 2px 8px; font-size: 12px; }
 .tools-live { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }

@@ -141,7 +141,13 @@ export function workersAIProvider(env: Env, model?: string): Provider {
         }
       }
 
-      const input: Record<string, unknown> = { messages, max_tokens: 2048, temperature: json ? 0.2 : 0.6 };
+      // Gemma 4 預設會先長篇「思考」：一句話要 20–30 秒、額度多用 16 倍，還會把輸出空間用完。關掉後約 1 秒
+      const input: Record<string, unknown> = {
+        messages,
+        max_tokens: 2048,
+        temperature: json ? 0.2 : 0.6,
+        chat_template_kwargs: { enable_thinking: false },
+      };
       if (tools?.length) input.tools = tools.map((t) => ({ type: "function", function: t }));
       const out: any = await env.AI.run(m as any, input as any);
 

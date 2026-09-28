@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { safeEqual } from "./auth";
 import { providerFor, type GeminiGate } from "./providers";
 import { GeminiLimiter, RateLimitedError } from "./ratelimit";
-import { runTool, toolLabel, TOOL_DECLS, type ExpenseInput, type RoomApi } from "./tools";
+import { reverseArea, runTool, toolLabel, TOOL_DECLS, type AttachedImage, type ExpenseInput, type RoomApi } from "./tools";
 import { INITIAL_ITINERARY, TRIP } from "./trip-data";
 import type { Env, Part, Provider, SessionUser, Turn } from "./types";
 
@@ -43,6 +43,12 @@ function jstNow(): { date: string; time: string; weekday: string } {
   };
 }
 
+function distanceMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371000, rad = (x: number) => (x * Math.PI) / 180;
+  const a = Math.sin(rad(lat2 - lat1) / 2) ** 2 + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(rad(lon2 - lon1) / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
 function toBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   let s = "";
@@ -78,6 +84,10 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT, ts INTEGER);
       CREATE TABLE IF NOT EXISTS login_attempts (ip TEXT PRIMARY KEY, count INTEGER, ts INTEGER);
     `);
+    // v2：位置多存一個地名（反查地址），讓 AI 不用自己猜座標在哪
+    if (!this.sql.exec("PRAGMA table_info(locations)").toArray().some((c) => c.name === "area")) {
+      this.sql.exec("ALTER TABLE locations ADD COLUMN area TEXT");
+    }
     if (this.sql.exec("SELECT COUNT(*) AS n FROM itinerary").one().n === 0) {
       for (const d of INITIAL_ITINERARY) {
         this.sql.exec("INSERT INTO itinerary VALUES (?, ?, ?, ?, ?, ?)", d.date, d.title, d.detail, d.status, Date.now(), "初始行程");
@@ -396,10 +406,29 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
   }
 
   private saveLocation(name: string, loc: { lat: number; lon: number; accuracy?: number }) {
+    // 移動不到 200 公尺就沿用上次查到的地名，省得每次都反查
+    const prev = this.memberLocation(name)[0];
+    const keepArea = prev?.area && distanceMeters(prev.lat, prev.lon, loc.lat, loc.lon) < 200 ? prev.area : null;
     this.sql.exec(
-      "INSERT INTO locations VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET lat = excluded.lat, lon = excluded.lon, accuracy = excluded.accuracy, ts = excluded.ts",
-      name, loc.lat, loc.lon, loc.accuracy ?? null, Date.now(),
+      `INSERT INTO locations (name, lat, lon, accuracy, ts, area) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET lat = excluded.lat, lon = excluded.lon, accuracy = excluded.accuracy, ts = excluded.ts, area = excluded.area`,
+      name, loc.lat, loc.lon, loc.accuracy ?? null, Date.now(), keepArea,
     );
+    if (!keepArea) this.ctx.waitUntil(this.ensureArea(name));
+  }
+
+  /** 反查成員目前位置的地名並存起來（最多等 8 秒，失敗就算了，下次再查） */
+  private async ensureArea(name: string): Promise<string | null> {
+    const l = this.memberLocation(name)[0];
+    if (!l) return null;
+    if (l.area) return l.area;
+    try {
+      const area = await reverseArea(l.lat, l.lon);
+      if (area) this.sql.exec("UPDATE locations SET area = ? WHERE name = ? AND ts = ?", area, name, l.ts);
+      return area || null;
+    } catch {
+      return null;
+    }
   }
 
   // ================= RoomApi（給工具用） =================
@@ -415,7 +444,10 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     const rows = name
       ? this.sql.exec("SELECT * FROM locations WHERE name = ?", name).toArray()
       : this.sql.exec("SELECT * FROM locations ORDER BY ts DESC").toArray();
-    return rows.map((r) => ({ name: r.name as string, lat: r.lat as number, lon: r.lon as number, accuracy: r.accuracy as number | null, ts: r.ts as number }));
+    return rows.map((r) => ({
+      name: r.name as string, lat: r.lat as number, lon: r.lon as number,
+      accuracy: r.accuracy as number | null, ts: r.ts as number, area: (r.area as string | null) ?? null,
+    }));
   }
 
   addMemory(content: string, category: string, author: string): number {
@@ -618,7 +650,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       .join("\n");
     const mems = this.memories().map((m) => `- #${m.id}［${m.category}］${m.content}（${m.author}）`).join("\n") || "（目前沒有）";
     const locs = this.memberLocation()
-      .map((l) => `- ${l.name}：${l.lat.toFixed(5)},${l.lon.toFixed(5)}（${Math.round((Date.now() - l.ts) / 60000)} 分鐘前）`)
+      .map((l) => `- ${l.name}：${l.area ? `${l.area}附近` : "地名查詢中"}（${l.lat.toFixed(5)},${l.lon.toFixed(5)}，${Math.round((Date.now() - l.ts) / 60000)} 分鐘前）`)
       .join("\n");
     const summary = this.setting("summary");
 
@@ -659,6 +691,9 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 工具回傳 error 代表失敗：要如實告訴成員沒有完成，不可以說已完成。記帳前確認分攤對象是否符合成員說的人數。
 - 提到日圓價格時附上約合台幣（用 convert_currency）。
 - 問路：用 plan_route 給 Google Maps 連結，必要時用 web_search 補充轉乘與票價。
+- 成員在哪裡，一律以「成員最近位置」或訊息裡附的地名為準，絕對不要自己猜地名；以前聊天裡說過的位置可能已經過時，不要沿用。
+- 每次有人問「附近」都要重新呼叫工具查詢，不可以沿用之前的回答。
+- 成員要求看照片／圖片時，用 find_images（關鍵字用日文或英文加地名）；圖片會自動顯示在回答下方，文字裡不要貼圖片網址，並提醒是網路圖片、僅供參考。沒有要求就不要找圖片。
 - 問「我附近有什麼」：直接用 find_nearby，near 留空（系統會自動用發問者的 GPS），回答時列出實際店名、距離、步行分鐘與地圖連結，不要只給「附近有很多」這種泛泛建議；需要評價再用 web_search 補充。問「某個地方附近有什麼」（例如龜有公園附近），也要用 find_nearby，near 填日文地名（亀有公園）。問「我在哪」用 get_member_locations，說出區域與最近的車站。
 - 迪士尼當天問排隊，用 disney_wait_times。
 - 有人說「我付了／花了…」→ 用 add_expense 記帳；問「花多少、怎麼分」→ expense_summary。
@@ -685,7 +720,10 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       }
     }
     let t = `［${trigger.author}］${trigger.text || (trigger.photo_id ? "請看這張照片" : "")}`;
-    if (trigger.lat != null) t += `（我目前的位置：${trigger.lat?.toFixed(5)},${trigger.lon?.toFixed(5)}）`;
+    if (trigger.lat != null) {
+      const area = this.memberLocation(trigger.author)[0]?.area;
+      t += `（我目前的位置：${area ? `${area}附近，` : ""}座標 ${trigger.lat?.toFixed(5)},${trigger.lon?.toFixed(5)}。位置可能變了，需要地點資訊請用工具重新查詢，不要沿用之前的回答）`;
+    }
     const parts: Part[] = [{ text: t }];
     if (image) parts.push(image);
     const last = turns[turns.length - 1];
@@ -707,8 +745,11 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       const p = this.sql.exec("SELECT mime, data FROM photos WHERE id = ?", trigger.photo_id).toArray()[0];
       if (p) image = { image: { mime: p.mime as string, data: toBase64(p.data as ArrayBuffer) } };
     }
+    // 附了位置就先把地名查好，AI 才不會自己猜在哪裡
+    if (trigger.lat != null) await this.ensureArea(trigger.author);
     const history = this.recentMessages(HISTORY_WINDOW);
     const system = this.systemPrompt(trigger, history[0]?.ts ?? trigger.ts);
+    const images: AttachedImage[] = [];
     const toolsUsed: string[] = [];
     let lastError = "";
     // 跨模型共用：Gemini 中途被限流時，備援模型接著已完成的工具結果繼續，不會重複記帳或重複查詢
@@ -740,7 +781,10 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
           for (const c of res.calls) {
             toolsUsed.push(c.name);
             this.broadcast({ type: "ai_tool", id, name: c.name, label: toolLabel(c.name), args: c.args });
-            const result = await runTool(c.name, c.args, { env: this.env, room: this, author: user.name });
+            const result = await runTool(c.name, c.args, {
+              env: this.env, room: this, author: user.name,
+              attachImage: (img) => images.length < 8 && images.push(img),
+            });
             resultParts.push({ result: { id: c.id, name: c.name, response: result } });
           }
           turns = [...turns, { role: "model", parts: modelParts }, { role: "user", parts: resultParts }];
@@ -749,7 +793,10 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
         if (!finalText.trim()) finalText = "嗯…我沒有想到好的回答，可以換個方式問我嗎？";
         const row = this.insertMessage({
           id, author: AI_NAME, role: "assistant", text: finalText, photo_id: null, lat: null, lon: null,
-          meta: JSON.stringify({ provider: provider.id, model: provider.model, tools: [...new Set(toolsUsed)].map(toolLabel) }),
+          meta: JSON.stringify({
+            provider: provider.id, model: provider.model, tools: [...new Set(toolsUsed)].map(toolLabel),
+            ...(images.length ? { images } : {}),
+          }),
         });
         this.broadcast({ type: "ai_done", id, message: this.publicMessage(row) });
         this.ctx.waitUntil(this.maybeConsolidateMemory());
