@@ -2,7 +2,7 @@
 const $ = (s) => document.querySelector(s);
 const els = {
   login: $("#login"), loginForm: $("#login-form"), loginName: $("#login-name"), loginPassword: $("#login-password"), loginError: $("#login-error"),
-  app: $("#app"), messages: $("#messages"), loadMore: $("#load-more"), conn: $("#conn"),
+  app: $("#app"), messages: $("#messages"), loadMore: $("#load-more"), toLatest: $("#to-latest"), toLatestN: $("#to-latest-n"), conn: $("#conn"),
   dayBadge: $("#day-badge"), todayTitle: $("#today-title"), online: $("#online"), avatars: $("#avatars"), chips: $("#chips"),
   nextCard: $("#next-card"), ncToggle: $("#nc-toggle"), chipsToggle: $("#chips-toggle"), tabbar: $("#tabbar"), more: $("#more"), moreActions: $("#more-actions"), moreAsks: $("#more-asks"),
   input: $("#input"), sendForm: $("#send-form"), sendBtn: $("#send-btn"), photoInput: $("#photo-input"),
@@ -183,21 +183,25 @@ function handle(m) {
       S.aiName = m.aiName;
       S.settings = m.settings;
       setState(m.state);
-      els.messages.querySelectorAll(".msg, .day-sep").forEach((n) => n.remove());
+      els.messages.querySelectorAll(".msg, .day-sep, .unread-sep").forEach((n) => n.remove());
       S.lastDay = null;
       S.live.clear();
       m.messages.forEach((msg) => appendMessage(msg));
       S.oldest = m.messages[0]?.ts ?? null;
       els.loadMore.hidden = m.messages.length < 60;
-      scrollToBottom(true);
+      restoreReadPosition();
       break;
     case "message":
-      appendMessage(m.message);
-      scrollToBottom(m.message.author === S.me.name);
+      newMessage(m.message);
       if (m.message.role === "user" && m.message.text.startsWith("🆘") && m.message.author !== S.me.name) showSos(m.message);
       break;
     case "older":
-      prependMessages(m.messages);
+      prependMessages(m.messages, m.hasMore);
+      S.loadingOlder = false;
+      if (S.jumpAfterLoad) {
+        S.jumpAfterLoad = false;
+        jumpToUnread();
+      }
       break;
     case "presence":
       renderPresence(m.online);
@@ -210,7 +214,7 @@ function handle(m) {
       setState(m.state);
       break;
     case "cleared":
-      els.messages.querySelectorAll(".msg, .day-sep").forEach((n) => n.remove());
+      els.messages.querySelectorAll(".msg, .day-sep, .unread-sep").forEach((n) => n.remove());
       S.lastDay = null;
       break;
     case "ai_start":
@@ -274,6 +278,7 @@ function messageNode(msg) {
   const node = document.createElement("div");
   node.className = `msg ${isAI ? "ai" : isMe ? "me" : "other"}`;
   node.dataset.id = msg.id;
+  node.dataset.ts = msg.ts;
   let body = "";
   if (msg.photo) body += `<img class="photo" src="${msg.photo}" loading="lazy" alt="照片" />`;
   if (msg.location) {
@@ -326,15 +331,17 @@ function appendMessage(msg) {
   if (els.messages.querySelector(`[data-id="${msg.id}"]`)) return;
   const sep = daySeparator(msg.ts);
   if (sep) els.messages.appendChild(sep);
-  els.messages.appendChild(messageNode(msg));
+  return els.messages.appendChild(messageNode(msg));
 }
 
-function prependMessages(list) {
+function prependMessages(list, hasMore) {
   if (!list.length) {
     els.loadMore.hidden = true;
     return;
   }
-  const prevHeight = els.messages.scrollHeight;
+  // 以目前最上面那則訊息當錨點，插入舊訊息後把它留在原本的位置（不論使用者停在哪）
+  const anchor = els.messages.querySelector(".msg");
+  const anchorTop = anchor?.getBoundingClientRect().top ?? 0;
   const frag = document.createDocumentFragment();
   let last = null;
   for (const msg of list) {
@@ -352,18 +359,173 @@ function prependMessages(list) {
   if (firstSep && firstSep.textContent === last) firstSep.remove();
   els.loadMore.after(frag);
   S.oldest = list[0].ts;
-  els.loadMore.hidden = list.length < 50;
-  els.messages.scrollTop = els.messages.scrollHeight - prevHeight;
+  els.loadMore.hidden = !hasMore;
+  if (anchor) els.messages.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
 }
 
-els.loadMore.addEventListener("click", () => wsSend({ type: "load_more", before: S.oldest }));
+// ---------- 已讀位置：像通訊軟體一樣，回來時停在上次讀到的地方（記在這支手機） ----------
+
+let readMarkCache = null;
+function readMark() {
+  if (readMarkCache === null) {
+    try {
+      readMarkCache = Number(localStorage.getItem("tta-read")) || 0;
+    } catch {
+      readMarkCache = 0;
+    }
+  }
+  return readMarkCache;
+}
+function writeMark(ts) {
+  readMarkCache = ts;
+  try {
+    localStorage.setItem("tta-read", String(ts));
+  } catch {}
+}
+
+/** 聊天畫面現在真的看得到：不在背景、沒有被分頁或翻譯蓋住 */
+const chatVisible = () => !document.hidden && !els.app.hidden && !els.panel.open && !els.translator.open;
+/** 正在看最底下：新訊息來了就跟著捲 */
+const following = () => nearBottom() && chatVisible();
+
+function loadOlder() {
+  if (S.loadingOlder || !S.oldest || S.ws?.readyState !== 1) return;
+  S.loadingOlder = true;
+  S.ws.send(JSON.stringify({ type: "load_more", before: S.oldest }));
+}
+els.loadMore.addEventListener("click", loadOlder);
+// 捲到接近頂端就自動載入更早的訊息，按鈕留著當備用
+new IntersectionObserver((entries) => entries[0].isIntersecting && !els.loadMore.hidden && loadOlder(), {
+  root: els.messages,
+  rootMargin: "300px 0px 0px 0px",
+}).observe(els.loadMore);
+
+function unreadSep() {
+  const sep = document.createElement("div");
+  sep.className = "unread-sep";
+  sep.textContent = "以下是未讀訊息";
+  return sep;
+}
+
+/** 連線（或重新連線）後：未讀起點比已載入的還早，就先補抓到那裡再跳過去 */
+function restoreReadPosition() {
+  S.loadingOlder = S.jumpAfterLoad = false;
+  const mark = readMark();
+  if (mark && S.oldest && mark < S.oldest && !els.loadMore.hidden) {
+    els.messages.scrollTop = els.messages.scrollHeight;
+    S.loadingOlder = S.jumpAfterLoad = true;
+    S.ws.send(JSON.stringify({ type: "load_more", before: S.oldest, after: mark }));
+  } else {
+    jumpToUnread();
+  }
+}
+
+/** 跳到第一則未讀並標出分隔線；沒有未讀（或第一次來）就到最底 */
+function jumpToUnread() {
+  els.messages.querySelector(".unread-sep")?.remove();
+  const mark = readMark();
+  const first = mark ? [...els.messages.querySelectorAll(".msg:not(.me)[data-ts]")].find((n) => Number(n.dataset.ts) > mark) : null;
+  if (first) {
+    const sep = unreadSep();
+    first.before(sep);
+    els.messages.scrollTop += sep.getBoundingClientRect().top - els.messages.getBoundingClientRect().top - 8;
+  } else {
+    els.messages.scrollTop = els.messages.scrollHeight;
+  }
+  requestAnimationFrame(updateReadMark);
+}
+
+/** 別人的新訊息：正在看最底下就跟著捲；沒在看（背景、開著其他分頁、往上翻舊訊息）就標出未讀起點 */
+function arrived(node, stick) {
+  if (!node) return;
+  if (stick) {
+    scrollToBottom(true);
+  } else {
+    const old = els.messages.querySelector(".unread-sep");
+    // 舊分隔線後面還有沒讀的就沿用（像通訊軟體一樣停在最早的未讀），都讀過了才移到這則前面
+    let stillUnread = false;
+    for (let n = old?.nextElementSibling; n && n !== node && !stillUnread; n = n.nextElementSibling) {
+      stillUnread = n.matches(".msg:not(.me)") && !!(n.dataset.live || Number(n.dataset.ts) > readMark());
+    }
+    if (!stillUnread) {
+      old?.remove();
+      node.before(unreadSep());
+    }
+  }
+  requestAnimationFrame(updateReadMark);
+}
+
+function newMessage(msg) {
+  const stick = following();
+  const node = appendMessage(msg);
+  if (msg.author === S.me?.name) scrollToBottom(true);
+  else arrived(node, stick);
+}
+
+/** 回到聊天（切回 App、關掉分頁或翻譯）時，未讀起點還在畫面下方就捲過去 */
+function revealUnread() {
+  if (!chatVisible()) return;
+  const sep = els.messages.querySelector(".unread-sep");
+  const box = els.messages.getBoundingClientRect();
+  if (sep && unreadCount() && sep.getBoundingClientRect().top > box.bottom - 60) {
+    els.messages.scrollTop += sep.getBoundingClientRect().top - box.top - 8;
+  }
+  requestAnimationFrame(updateReadMark);
+}
+
+/** 畫面上看得到的最後一則訊息就是「讀到這裡」 */
+function updateReadMark() {
+  // 正在補抓未讀起點之前的訊息時，畫面只是暫時停在最底，不算讀過
+  if (chatVisible() && !S.jumpAfterLoad) {
+    const bottom = els.messages.getBoundingClientRect().bottom;
+    const nodes = els.messages.querySelectorAll(".msg[data-ts]:not([data-live])");
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const r = nodes[i].getBoundingClientRect();
+      if (r.top + Math.min(r.height, 80) <= bottom) {
+        const ts = Number(nodes[i].dataset.ts);
+        if (ts > readMark()) writeMark(ts);
+        break;
+      }
+    }
+  }
+  renderLatestBtn();
+}
+
+function unreadCount() {
+  const mark = readMark();
+  let n = 0;
+  els.messages.querySelectorAll(".msg:not(.me)[data-ts]").forEach((x) => (x.dataset.live || Number(x.dataset.ts) > mark) && n++);
+  return n;
+}
+
+/** 往上翻時右下角出現「最新」按鈕，數字是還沒讀的則數 */
+function renderLatestBtn() {
+  const away = els.messages.scrollHeight - els.messages.scrollTop - els.messages.clientHeight > 300;
+  const n = away ? unreadCount() : 0;
+  els.toLatest.hidden = !away;
+  els.toLatestN.hidden = !n;
+  els.toLatestN.textContent = n > 99 ? "99+" : String(n);
+}
+
+let markRaf = 0;
+els.messages.addEventListener(
+  "scroll",
+  () => {
+    if (!markRaf) markRaf = requestAnimationFrame(() => ((markRaf = 0), updateReadMark()));
+  },
+  { passive: true },
+);
+els.toLatest.addEventListener("click", () => els.messages.scrollTo({ top: els.messages.scrollHeight, behavior: "smooth" }));
+els.panel.addEventListener("close", revealUnread);
+els.translator.addEventListener("close", revealUnread);
+document.addEventListener("visibilitychange", revealUnread);
 
 function nearBottom() {
   return els.messages.scrollHeight - els.messages.scrollTop - els.messages.clientHeight < 160;
 }
 
 function scrollToBottom(force) {
-  if (force || nearBottom()) requestAnimationFrame(() => (els.messages.scrollTop = els.messages.scrollHeight));
+  if (force || following()) requestAnimationFrame(() => (els.messages.scrollTop = els.messages.scrollHeight));
 }
 
 // ---------- AI 即時生成 ----------
@@ -371,15 +533,16 @@ function scrollToBottom(force) {
 function aiStart(m) {
   let live = S.live.get(m.id);
   if (!live) {
-    const stick = nearBottom();
+    const stick = following();
     const node = messageNode({ id: m.id, ts: Date.now(), author: S.aiName, role: "assistant", text: "", meta: null });
     node.querySelector(".ai-body").innerHTML = TYPING;
+    node.dataset.live = "1";
     const sep = daySeparator(Date.now());
     if (sep) els.messages.appendChild(sep);
     els.messages.appendChild(node);
     live = { node, text: "", raf: 0 };
     S.live.set(m.id, live);
-    scrollToBottom(stick);
+    arrived(node, stick);
   }
   live.node.querySelector(".ai-time").textContent = `${m.provider === "workers-ai" ? "Workers AI" : "Gemini"} 思考中…`;
 }
@@ -398,7 +561,7 @@ function aiDelta(m) {
   if (live.raf) return;
   live.raf = requestAnimationFrame(() => {
     live.raf = 0;
-    const stick = nearBottom();
+    const stick = following();
     live.node.querySelector(".ai-body").innerHTML = md(live.text);
     scrollToBottom(stick);
   });
@@ -415,14 +578,14 @@ function aiRetry(m) {
 
 function aiDone(m) {
   const live = S.live.get(m.id);
-  const stick = nearBottom();
+  const stick = following();
   const node = messageNode(m.message);
   if (live) {
     cancelAnimationFrame(live.raf);
     live.node.replaceWith(node);
     S.live.delete(m.id);
   } else {
-    appendMessage(m.message);
+    arrived(appendMessage(m.message), stick);
   }
   scrollToBottom(stick);
 }

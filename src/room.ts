@@ -335,11 +335,18 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
         return;
 
       case "load_more": {
+        const before = Number(msg.before) || Date.now();
+        const after = Number(msg.after) || 0;
+        // after＝回到上次讀到的地方：一次補到未讀起點前兩則（最多 200 則）；平常往上捲每次 50 則
+        const floor = after
+          ? (this.sql.exec<{ ts: number }>("SELECT ts FROM messages WHERE ts <= ? ORDER BY ts DESC LIMIT 1 OFFSET 2", after).toArray()[0]?.ts ?? 0)
+          : 0;
         const rows = this.sql
-          .exec<MessageRow>("SELECT * FROM messages WHERE ts < ? ORDER BY ts DESC LIMIT 50", Number(msg.before) || Date.now())
+          .exec<MessageRow>(`SELECT * FROM messages WHERE ts < ? AND ts >= ? ORDER BY ts DESC LIMIT ${after ? 200 : 50}`, before, floor)
           .toArray()
           .reverse();
-        return this.send(ws, { type: "older", messages: rows.map((m) => this.publicMessage(m)) });
+        const hasMore = rows.length > 0 && this.sql.exec("SELECT 1 FROM messages WHERE ts < ? LIMIT 1", rows[0].ts).toArray().length > 0;
+        return this.send(ws, { type: "older", messages: rows.map((m) => this.publicMessage(m)), hasMore });
       }
 
       case "get_state":
