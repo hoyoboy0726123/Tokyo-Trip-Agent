@@ -726,7 +726,10 @@ function geminiUsageText(g) {
 const TAB_OF = { itinerary: "itinerary", expenses: "expenses", settings: "settings" };
 
 function setTab(tab) {
-  els.tabbar.querySelectorAll("button").forEach((b) => {
+  const buttons = [...els.tabbar.querySelectorAll("button")];
+  // 分頁列上沒有的頁面（例如行程）算在工具箱底下
+  if (!buttons.some((b) => b.dataset.tab === tab && !b.hidden)) tab = "hub";
+  buttons.forEach((b) => {
     if (b.dataset.tab === tab) b.setAttribute("aria-current", "page");
     else b.removeAttribute("aria-current");
   });
@@ -739,6 +742,7 @@ els.tabbar.querySelectorAll("button").forEach((b) =>
       else scrollToBottom(true);
       return;
     }
+    if (b.dataset.tab === "translator") return openTranslator();
     openPanel(b.dataset.tab);
   }),
 );
@@ -1020,11 +1024,11 @@ function renderPanelInner() {
 // ================= 工具箱分頁 =================
 
 const TOOL_CARDS = [
+  ["itinerary", "calendar", "行程", "每天的安排，可以修改"],
   ["tickets", "ticket", "票券保管箱", "門票、訂位憑證，離線可看"],
   ["map", "users", "家人位置", "看大家在哪、走散求救"],
   ["checklist", "list", "共用清單", "行李、購物、待辦"],
   ["reminders", "bell", "提醒", "時間到在群組通知"],
-  ["translator", "lang", "翻譯常用句", "念給對方聽、放大給對方看"],
   ["diary", "book", "旅遊日記", "每晚自動寫、匯出相簿"],
 ];
 
