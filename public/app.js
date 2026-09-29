@@ -8,7 +8,7 @@ const els = {
   input: $("#input"), sendForm: $("#send-form"), sendBtn: $("#send-btn"), photoInput: $("#photo-input"),
   attach: $("#attach"), attachImg: $("#attach-img"), attachLoc: $("#attach-loc"), attachClear: $("#attach-clear"),
   panel: $("#panel"), panelTitle: $("#panel-title"), panelBody: $("#panel-body"), panelClose: $("#panel-close"),
-  viewer: $("#viewer"), viewerImg: $("#viewer-img"),
+  viewer: $("#viewer"), viewerImg: $("#viewer-img"), viewerDl: $("#viewer-dl"),
   translator: $("#translator"), trBody: $("#tr-body"), trTabs: $("#tr-tabs"),
   showcase: $("#showcase"),
 };
@@ -721,11 +721,45 @@ function openPanel(name) {
   els.panel.scrollTop = 0;
 }
 
+// 打開時就先抓好圖檔：iOS 的分享面板必須在點擊當下叫出，等下載完才叫會被擋
+let viewerBlob = null;
 function openViewer(src) {
   els.viewerImg.src = src;
+  els.viewerDl.lastElementChild.textContent = "下載";
+  viewerBlob = fetch(src).then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))));
+  viewerBlob.catch(() => {});
   els.viewer.showModal();
 }
 els.viewer.addEventListener("click", () => els.viewer.close());
+els.viewerDl.addEventListener("click", async (e) => {
+  e.stopPropagation();
+  const label = els.viewerDl.lastElementChild;
+  let blob;
+  try {
+    blob = await viewerBlob;
+  } catch {
+    label.textContent = "下載失敗";
+    return;
+  }
+  const ext = (blob.type.split("/")[1] || "jpg").replace("jpeg", "jpg").replace(/\+.*/, "");
+  const file = new File([blob], `東京旅伴-${Date.now()}.${ext}`, { type: blob.type });
+  // 手機走分享面板，才能選「儲存影像」存進相簿；電腦直接下載檔案
+  if (matchMedia("(pointer: coarse)").matches && navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file] });
+      return;
+    } catch (err) {
+      if (err.name === "AbortError") return;
+    }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(file);
+  a.download = file.name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+});
 
 function action(payload) {
   wsSend({ type: "action", ...payload });

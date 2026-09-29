@@ -226,6 +226,9 @@ input, textarea, select { font: inherit; color: inherit; }
 .viewer { padding: 0; border: 0; background: transparent; max-width: 100vw; max-height: 100dvh; }
 .viewer::backdrop { background: rgba(0,0,0,.85); }
 .viewer img { max-width: 100vw; max-height: 100dvh; display: block; }
+.viewer-dl { position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom)); transform: translateX(-50%); display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 22px; border: 0; border-radius: 999px; background: rgba(255,255,255,.94); color: #1c1f26; font: inherit; font-size: 15px; font-weight: 700; box-shadow: 0 4px 18px rgba(0,0,0,.35); cursor: pointer; }
+.viewer-dl svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.viewer-dl:disabled { opacity: .6; }
 
 /* ---------- 🧰 工具箱 ---------- */
 .tile-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
