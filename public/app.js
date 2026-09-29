@@ -3,8 +3,9 @@ const $ = (s) => document.querySelector(s);
 const els = {
   login: $("#login"), loginForm: $("#login-form"), loginName: $("#login-name"), loginPassword: $("#login-password"), loginError: $("#login-error"),
   app: $("#app"), messages: $("#messages"), loadMore: $("#load-more"), conn: $("#conn"),
-  dayBadge: $("#day-badge"), todayTitle: $("#today-title"), online: $("#online"),
-  input: $("#input"), sendForm: $("#send-form"), sendBtn: $("#send-btn"), photoInput: $("#photo-input"), locBtn: $("#loc-btn"),
+  dayBadge: $("#day-badge"), todayTitle: $("#today-title"), online: $("#online"), avatars: $("#avatars"), chips: $("#chips"),
+  nextCard: $("#next-card"), tabbar: $("#tabbar"), more: $("#more"), moreActions: $("#more-actions"), moreAsks: $("#more-asks"),
+  input: $("#input"), sendForm: $("#send-form"), sendBtn: $("#send-btn"), photoInput: $("#photo-input"),
   attach: $("#attach"), attachImg: $("#attach-img"), attachLoc: $("#attach-loc"), attachClear: $("#attach-clear"),
   panel: $("#panel"), panelTitle: $("#panel-title"), panelBody: $("#panel-body"), panelClose: $("#panel-close"),
   viewer: $("#viewer"), viewerImg: $("#viewer-img"),
@@ -26,6 +27,34 @@ const jst = (ts) => new Date(ts + 9 * 3600e3);
 const timeText = (ts) => jst(ts).toISOString().slice(11, 16);
 const dayText = (ts) => { const d = jst(ts); return `${d.getUTCMonth() + 1}/${d.getUTCDate()}（${"日一二三四五六"[d.getUTCDay()]}）`; };
 const yen = (n) => `${n < 0 ? "-" : ""}¥${Math.abs(Math.round(n)).toLocaleString()}`;
+const dateLabel = (date) => { const d = new Date(date + "T00:00:00Z"); return `${d.getUTCMonth() + 1}/${d.getUTCDate()}（${"日一二三四五六"[d.getUTCDay()]}）`; };
+
+// 方案 A 的線條圖示（路徑取自 Lucide）
+const ICONS = {
+  luggage: '<path d="M6 20a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2"/><path d="M8 18V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v14"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2"/>',
+  pin: '<path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/>',
+  receipt: '<path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/><path d="M8 8h8M8 12h8"/>',
+  lang: '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/>',
+  plus: '<path d="M5 12h14M12 5v14"/>',
+  camera: '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>',
+  utensils: '<path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2"/><path d="M7 2v20"/><path d="M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7"/>',
+  exchange: '<path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/>',
+  home: '<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  train: '<rect width="16" height="16" x="4" y="3" rx="2"/><path d="M4 11h16M12 3v8M8 19l-2 3M18 22l-2-3"/>',
+  clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+  msg: '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
+  calendar: '<rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
+  ticket: '<path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2M13 17v2M13 11v2"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
+  list: '<path d="m3 17 2 2 4-4M3 7l2 2 4-4M13 6h8M13 12h8M13 18h8"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  book: '<path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/>',
+  bookmark: '<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>',
+  help: '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"/>',
+  chev: '<path d="m9 18 6-6-6-6"/>',
+};
+const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] ?? ""}</svg>`;
 
 // 模型偶爾會寫 $\rightarrow$ 這類 LaTeX；聊天室不載數學排版，換成對應符號就好
 const LATEX = { rightarrow: "→", to: "→", leftarrow: "←", Rightarrow: "⇒", times: "×", div: "÷", approx: "≈", pm: "±", le: "≤", leq: "≤", ge: "≥", geq: "≥", neq: "≠", cdot: "·", sim: "～", yen: "¥" };
@@ -57,8 +86,9 @@ async function checkSession() {
       S.me = { name, admin: false };
       S.offline = true;
       els.app.hidden = false;
+      renderChips();
       els.conn.hidden = false;
-      els.conn.textContent = "📴 離線中：常用句（🇯🇵）與票券（🧰）仍可使用";
+      els.conn.textContent = "📴 離線中：翻譯常用句與票券仍可使用";
       setTimeout(connect, 5000);
       return;
     }
@@ -101,6 +131,7 @@ els.loginForm.addEventListener("submit", async (e) => {
 
 function startApp() {
   els.app.hidden = false;
+  renderChips();
   connect();
   if (localStorage.getItem("tta-autoloc") === "1") startAutoLocation();
 }
@@ -169,7 +200,7 @@ function handle(m) {
       prependMessages(m.messages);
       break;
     case "presence":
-      els.online.textContent = `🟢 ${m.online.join("、")}`;
+      renderPresence(m.online);
       break;
     case "settings":
       S.settings = m.settings;
@@ -198,13 +229,13 @@ function handle(m) {
       const live = S.live.get(m.id);
       if (live) {
         live.text = "";
-        live.node.querySelector(".ai-text").innerHTML = `<span class="typing"><span></span><span></span><span></span></span>`;
+        live.node.querySelector(".ai-body").innerHTML = TYPING;
       }
       break;
     }
     case "ai_note": {
       const live = S.live.get(m.id);
-      if (live) live.node.querySelector(".meta").textContent = m.text;
+      if (live) live.node.querySelector(".ai-time").textContent = m.text;
       break;
     }
     case "ai_done":
@@ -227,13 +258,22 @@ function handle(m) {
 
 // ================= 訊息渲染 =================
 
+const TYPING = `<span class="typing"><span></span><span></span><span></span></span>`;
+
+/** 工具標籤原本帶 emoji（🌤 查天氣），方案 A 只留文字 */
+const toolBadge = (label) => `<span class="tool-chip">${escapeHtml(String(label).replace(/^[^\p{L}\p{N}]+/u, ""))}</span>`;
+
+function renderPresence(online) {
+  els.online.textContent = online.length ? `${online.join("、")}在線` : "";
+  els.avatars.innerHTML = online.slice(0, 3).map((n) => `<span style="background:${colorFor(n)}">${escapeHtml([...n][0])}</span>`).join("");
+}
+
 function messageNode(msg) {
   const isAI = msg.role === "assistant";
   const isMe = !isAI && msg.author === S.me?.name;
   const node = document.createElement("div");
   node.className = `msg ${isAI ? "ai" : isMe ? "me" : "other"}`;
   node.dataset.id = msg.id;
-  const avatar = isAI ? `<div class="avatar" style="background:var(--red)">🗼</div>` : `<div class="avatar" style="background:${colorFor(msg.author)}">${escapeHtml([...msg.author][0])}</div>`;
   let body = "";
   if (msg.photo) body += `<img class="photo" src="${msg.photo}" loading="lazy" alt="照片" />`;
   if (msg.location) {
@@ -254,14 +294,20 @@ function messageNode(msg) {
       })
       .join("")}</div>${webImages ? `<div class="small muted">🖼 網路圖片，僅供參考</div>` : ""}`;
   }
-  const tools = msg.meta?.tools?.length ? msg.meta.tools.map((t) => `<span class="tool-chip">${escapeHtml(t)}</span>`).join("") : "";
-  const provider = isAI && msg.meta?.provider ? (msg.meta.provider === "gemini" ? "Gemini" : "Workers AI") : "";
-  node.innerHTML = `${isMe ? "" : avatar}
-    <div class="bubble-wrap">
-      ${isMe ? "" : `<div class="name">${escapeHtml(msg.author)}</div>`}
-      <div class="bubble">${body}</div>
-      <div class="meta">${timeText(msg.ts)}${provider ? ` · ${provider}` : ""} ${tools}</div>
+  if (isAI) {
+    const provider = msg.meta?.provider ? (msg.meta.provider === "workers-ai" ? "Workers AI" : "Gemini") : "";
+    node.innerHTML = `<div class="ai-card">
+      <div class="ai-head"><span class="ai-avatar">${svg("luggage")}</span><span class="ai-name">${escapeHtml(msg.author)}</span>
+        <span class="ai-tools">${(msg.meta?.tools ?? []).map(toolBadge).join("")}</span>
+        <span class="ai-time">${timeText(msg.ts)}${provider ? ` · ${provider}` : ""}</span></div>
+      <div class="ai-body rich">${body}</div>
     </div>`;
+  } else if (isMe) {
+    node.innerHTML = `<div class="bubble-wrap"><div class="bubble rich">${body}</div><div class="meta">${timeText(msg.ts)}</div></div>`;
+  } else {
+    node.innerHTML = `<div class="avatar" style="background:${colorFor(msg.author)}">${escapeHtml([...msg.author][0])}</div>
+      <div class="bubble-wrap"><div class="name">${escapeHtml(msg.author)}・${timeText(msg.ts)}</div><div class="bubble rich">${body}</div></div>`;
+  }
   node.querySelectorAll("img.photo").forEach((img) => img.addEventListener("click", () => openViewer(img.src)));
   return node;
 }
@@ -327,8 +373,7 @@ function aiStart(m) {
   if (!live) {
     const stick = nearBottom();
     const node = messageNode({ id: m.id, ts: Date.now(), author: S.aiName, role: "assistant", text: "", meta: null });
-    const bubble = node.querySelector(".bubble");
-    bubble.innerHTML = `<div class="tools-live"></div><div class="ai-text"><span class="typing"><span></span><span></span><span></span></span></div>`;
+    node.querySelector(".ai-body").innerHTML = TYPING;
     const sep = daySeparator(Date.now());
     if (sep) els.messages.appendChild(sep);
     els.messages.appendChild(node);
@@ -336,16 +381,13 @@ function aiStart(m) {
     S.live.set(m.id, live);
     scrollToBottom(stick);
   }
-  live.node.querySelector(".meta").textContent = `${m.provider === "gemini" ? "Gemini" : "Workers AI"} 思考中…`;
+  live.node.querySelector(".ai-time").textContent = `${m.provider === "workers-ai" ? "Workers AI" : "Gemini"} 思考中…`;
 }
 
 function aiTool(m) {
   const live = S.live.get(m.id);
   if (!live) return;
-  const chip = document.createElement("span");
-  chip.className = "tool-chip";
-  chip.textContent = m.label;
-  live.node.querySelector(".tools-live").appendChild(chip);
+  live.node.querySelector(".ai-tools").insertAdjacentHTML("beforeend", toolBadge(m.label));
   scrollToBottom(false);
 }
 
@@ -357,7 +399,7 @@ function aiDelta(m) {
   live.raf = requestAnimationFrame(() => {
     live.raf = 0;
     const stick = nearBottom();
-    live.node.querySelector(".ai-text").innerHTML = md(live.text);
+    live.node.querySelector(".ai-body").innerHTML = md(live.text);
     scrollToBottom(stick);
   });
 }
@@ -366,7 +408,7 @@ function aiRetry(m) {
   const live = S.live.get(m.id);
   if (!live) return;
   live.text = "";
-  live.node.querySelector(".ai-text").innerHTML = m.rateLimited
+  live.node.querySelector(".ai-body").innerHTML = m.rateLimited
     ? `<span class="muted small">Gemini 額度冷卻中，改用備援模型回答…</span>`
     : `<span class="muted small">主要模型出錯，改用備援模型…</span>`;
 }
@@ -426,20 +468,71 @@ els.sendForm.addEventListener("submit", async (e) => {
   }
 });
 
-// 帶 data-panel 的是工具箱捷徑，由下面開面板的共用處理
-document.querySelectorAll("#chips button:not([data-panel])").forEach((b) =>
-  b.addEventListener("click", () => {
-    if (b.hasAttribute("data-receipt")) {
-      // 先選收據照片，文字幫忙填好，確認後按送出
-      els.input.value = "幫我把這張收據記帳（我付的）";
-      els.photoInput.click();
-      return;
-    }
-    els.input.value = b.dataset.q;
-    if (b.dataset.q.includes("附近") || b.dataset.q.includes("回住宿")) attachLocation(true);
-    else els.sendForm.requestSubmit();
-  }),
-);
+/** 送出一句問題；問「附近／回住宿」要先附上位置 */
+function ask(q, withLocation = false) {
+  els.input.value = q;
+  if (withLocation) attachLocation(true);
+  else els.sendForm.requestSubmit();
+}
+
+/** 收據記帳：先選照片，文字幫忙填好，確認後按送出 */
+function receiptFlow() {
+  els.input.value = "幫我把這張收據記帳（我付的）";
+  els.photoInput.click();
+}
+
+/** 輸入框上方的快捷列：最常用的 4 個＋「更多」 */
+function renderChips() {
+  const chips = [
+    ["sun", "今天", () => ask("今天的行程和天氣？")],
+    ["pin", "附近", () => ask("我附近有什麼好吃的？", true)],
+    ["receipt", "收據", receiptFlow],
+    ["lang", "翻譯", openTranslator],
+    ["plus", "更多", openMore],
+  ];
+  els.chips.innerHTML = chips.map(([icon, label], i) => `<button type="button" data-i="${i}">${svg(icon)}${label}</button>`).join("");
+  els.chips.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => chips[Number(b.dataset.i)][2]()));
+}
+
+// ---------- 「更多」：傳給 AI 的動作與常用問法 ----------
+
+const MORE_ASKS = ["明天的行程和天氣？", "目前花了多少錢？大家要怎麼分？", "最近東京有地震或颱風嗎？會影響行程嗎？"];
+
+function moreActions() {
+  return [
+    ["camera", "拍照問", () => els.photoInput.click()],
+    ["pin", "附上位置", () => attachLocation(false)],
+    ["receipt", "收據記帳", receiptFlow],
+    ["lang", "翻譯", openTranslator],
+    ["sun", "今天", () => ask("今天的行程和天氣？")],
+    ["utensils", "附近美食", () => ask("我附近有什麼好吃的？", true)],
+    ["exchange", "匯率", () => ask("現在日圓匯率多少？1000 日圓等於多少台幣？")],
+    ["home", "回住宿", () => ask("我要怎麼回住宿？", true)],
+    ["train", "電車狀況", () => ask("有樂町線、山手線現在有延誤嗎？")],
+    ["clock", "迪士尼排隊", () => ask("迪士尼現在哪些設施排隊最少？")],
+  ];
+}
+
+function openMore() {
+  const actions = moreActions();
+  els.moreActions.innerHTML = actions.map(([icon, label], i) => `<button type="button" data-i="${i}"><span class="ag-icon">${svg(icon)}</span>${label}</button>`).join("");
+  els.moreAsks.innerHTML = MORE_ASKS.map((q, i) => `<button type="button" data-q="${i}">${svg("msg")}${escapeHtml(q)}</button>`).join("");
+  els.moreActions.querySelectorAll("button").forEach((b) =>
+    b.addEventListener("click", () => {
+      els.more.close();
+      actions[Number(b.dataset.i)][2]();
+    }),
+  );
+  els.moreAsks.querySelectorAll("button").forEach((b) =>
+    b.addEventListener("click", () => {
+      els.more.close();
+      ask(MORE_ASKS[Number(b.dataset.q)]);
+    }),
+  );
+  if (!els.more.open) els.more.showModal();
+}
+$("#more-close").addEventListener("click", () => els.more.close());
+els.more.addEventListener("click", (e) => e.target === els.more && els.more.close());
 
 // ---------- 照片 ----------
 
@@ -485,7 +578,6 @@ function getPosition() {
 }
 
 async function attachLocation(thenSend) {
-  els.locBtn.classList.add("active");
   els.attachLoc.textContent = "📍 定位中…";
   els.attach.hidden = false;
   try {
@@ -494,21 +586,14 @@ async function attachLocation(thenSend) {
     if (thenSend) els.sendForm.requestSubmit();
   } catch (err) {
     els.attachLoc.textContent = "";
-    els.locBtn.classList.remove("active");
     if (!S.pending.photo) els.attach.hidden = true;
     alert(err.message);
     if (thenSend && els.input.value) els.sendForm.requestSubmit();
   }
 }
 
-els.locBtn.addEventListener("click", () => {
-  if (S.pending.location) return clearLocation();
-  attachLocation(false);
-});
-
 function clearLocation() {
   S.pending.location = null;
-  els.locBtn.classList.remove("active");
   els.attachLoc.textContent = "";
   if (!S.pending.photo) els.attach.hidden = true;
 }
@@ -558,23 +643,39 @@ function setState(state) {
     if (els.translator.open && TR.tab === "phrases") renderPhraseList();
   }
   const now = jst(Date.now()).toISOString().slice(0, 10);
-  const start = new Date(state.trip.startDate + "T00:00:00Z");
-  const day = Math.floor((new Date(now + "T00:00:00Z") - start) / 86400e3) + 1;
-  const today = state.itinerary.find((d) => d.date === now);
-  if (day < 1) {
-    els.dayBadge.textContent = `倒數 ${1 - day} 天`;
-    els.todayTitle.textContent = state.trip.title;
-  } else if (today) {
-    els.dayBadge.textContent = `Day ${day}`;
-    els.todayTitle.textContent = today.title;
-  } else {
-    els.dayBadge.textContent = "🏠";
-    els.todayTitle.textContent = "旅程結束，歡迎回家！";
-  }
+  const t = state.trip;
+  const day = Math.floor((Date.parse(now + "T00:00:00Z") - Date.parse(t.startDate + "T00:00:00Z")) / 86400e3) + 1;
+  els.todayTitle.textContent = t.title;
+  els.dayBadge.textContent = day < 1 ? `倒數 ${1 - day} 天` : now <= t.endDate ? `Day ${day}` : "旅程結束";
+  renderNextCard(state, now);
   if (S.panel && S.panel !== "settings") renderPanel();
   const usage = document.querySelector("#gemini-usage");
   if (usage) usage.textContent = geminiUsageText(state.gemini);
 }
+
+/** 「下一站」票券卡：出發前顯示出發日與第一天行程，旅途中顯示今天的行程，回國後隱藏 */
+function renderNextCard(state, now) {
+  const t = state.trip;
+  const it = state.itinerary || [];
+  let label, title, sub;
+  if (now < t.startDate) {
+    const first = it.find((d) => d.date === t.startDate);
+    label = "下一站";
+    title = `${dateLabel(t.startDate)} 出發`;
+    sub = first?.detail || first?.title || t.accommodation || "";
+  } else if (now <= t.endDate) {
+    const today = it.find((d) => d.date === now);
+    label = `今天・${dateLabel(now)}`;
+    title = today?.title || "自由活動";
+    sub = today?.detail || today?.status || "";
+  } else {
+    els.nextCard.hidden = true;
+    return;
+  }
+  els.nextCard.innerHTML = `<span class="nc-main"><span class="nc-label">${escapeHtml(label)}</span><span class="nc-title">${escapeHtml(title)}</span>${sub ? `<span class="nc-sub">${escapeHtml(sub)}</span>` : ""}</span><span class="nc-side">${svg("calendar")}行程</span>`;
+  els.nextCard.hidden = false;
+}
+els.nextCard.addEventListener("click", () => openPanel("itinerary"));
 
 function geminiUsageText(g) {
   if (!g) return "";
@@ -584,16 +685,40 @@ function geminiUsageText(g) {
   return s;
 }
 
-document.querySelectorAll("[data-panel]").forEach((b) => b.addEventListener("click", () => openPanel(b.dataset.panel)));
+// ---------- 底部分頁列：聊天以外的分頁是蓋在聊天上方的整頁面板 ----------
+
+const TAB_OF = { itinerary: "itinerary", expenses: "expenses", settings: "settings" };
+
+function setTab(tab) {
+  els.tabbar.querySelectorAll("button").forEach((b) => {
+    if (b.dataset.tab === tab) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  });
+}
+
+els.tabbar.querySelectorAll("button").forEach((b) =>
+  b.addEventListener("click", () => {
+    if (b.dataset.tab === "chat") {
+      if (els.panel.open) els.panel.close();
+      else scrollToBottom(true);
+      return;
+    }
+    openPanel(b.dataset.tab);
+  }),
+);
 els.panelClose.addEventListener("click", () => els.panel.close());
-els.panel.addEventListener("close", () => (S.panel = null));
-els.panel.addEventListener("click", (e) => e.target === els.panel && els.panel.close());
+els.panel.addEventListener("close", () => {
+  S.panel = null;
+  setTab("chat");
+});
 
 function openPanel(name) {
   S.panel = name;
   renderPanel();
+  setTab(TAB_OF[name] ?? "hub");
   if (name === "settings" && S.ws?.readyState === 1) S.ws.send(JSON.stringify({ type: "get_state" }));
-  if (!els.panel.open) els.panel.showModal();
+  if (!els.panel.open) els.panel.show();
+  els.panel.scrollTop = 0;
 }
 
 function openViewer(src) {
@@ -606,14 +731,20 @@ function action(payload) {
   wsSend({ type: "action", ...payload });
 }
 
+/** 分頁標題用霞鶩文楷，不帶 emoji（各頁面原本的標題有 emoji，在這裡統一拿掉） */
 function renderPanel() {
+  renderPanelInner();
+  els.panelTitle.textContent = els.panelTitle.textContent.replace(/^[^\p{L}\p{N}]+/u, "");
+}
+
+function renderPanelInner() {
   const st = S.state;
   const b = els.panelBody;
   if (!st) {
     // 離線時只有工具箱與票券能用（票券照片有快取）
     if (S.panel === "hub" || S.panel === "tickets" || S.panel === "guide") return renderToolPanel(null, b);
     els.panelTitle.textContent = "📴 離線中";
-    b.innerHTML = `<div class="card small muted">目前沒有網路，這個功能暫時不能用。常用句（🇯🇵）和票券（🧰 → 🎫）離線也能看。</div>`;
+    b.innerHTML = `<div class="card small muted">目前沒有網路，這個功能暫時不能用。翻譯常用句和票券保管箱離線也能看。</div>`;
     return;
   }
   if (["hub", "guide", "map", "checklist", "tickets", "reminders", "diary"].includes(S.panel)) return renderToolPanel(st, b);
@@ -816,26 +947,28 @@ function renderPanel() {
   }
 }
 
-// ================= 🧰 工具箱 =================
+// ================= 工具箱分頁 =================
 
-const TOOL_TILES = [
-  ["map", "🗺", "家人位置", "看大家在哪、走散求救"],
-  ["checklist", "✅", "清單", "購物、行李、待辦"],
-  ["tickets", "🎫", "票券", "門票、訂位憑證，離線可看"],
-  ["reminders", "⏰", "提醒", "時間到在群組通知"],
-  ["diary", "📔", "旅遊日記", "每晚自動寫、匯出相簿"],
-  ["memories", "🧠", "長期記憶", "AI 記得的事"],
+const TOOL_CARDS = [
+  ["tickets", "ticket", "票券保管箱", "門票、訂位憑證，離線可看"],
+  ["map", "users", "家人位置", "看大家在哪、走散求救"],
+  ["checklist", "list", "共用清單", "行李、購物、待辦"],
+  ["reminders", "bell", "提醒", "時間到在群組通知"],
+  ["translator", "lang", "翻譯常用句", "念給對方聽、放大給對方看"],
+  ["diary", "book", "旅遊日記", "每晚自動寫、匯出相簿"],
 ];
 
 function renderToolPanel(st, b) {
   switch (S.panel) {
     case "hub": {
-      els.panelTitle.textContent = "🧰 工具箱";
-      b.innerHTML = `<button class="guide-btn" data-go="guide">📖 功能使用說明<span class="small muted">每個功能怎麼用、可以怎麼問</span></button>
-        <div class="tile-grid">${TOOL_TILES.map(
-        ([id, icon, name, desc]) => `<button class="tile" data-go="${id}"><span class="tile-icon">${icon}</span><b>${name}</b><span class="small muted">${desc}</span></button>`,
-      ).join("")}</div>`;
-      b.querySelectorAll("[data-go]").forEach((x) => x.addEventListener("click", () => openPanel(x.dataset.go)));
+      els.panelTitle.textContent = "工具箱";
+      b.innerHTML = `
+        <div class="tb-grid">${TOOL_CARDS.map(([id, icon, name, desc]) => `<button class="tb-card" data-go="${id}"><span class="tb-icon">${svg(icon)}</span><b>${name}</b><span class="small muted">${desc}</span></button>`).join("")}</div>
+        <div class="tb-list">
+          <button data-go="memories">${svg("bookmark")}<span>長期記憶 <span class="small muted">AI 記得的偏好與決定</span></span><span class="chev">${svg("chev")}</span></button>
+          <button data-go="guide">${svg("help")}<span>使用說明 <span class="small muted">每個功能怎麼用</span></span><span class="chev">${svg("chev")}</span></button>
+        </div>`;
+      b.querySelectorAll("[data-go]").forEach((x) => x.addEventListener("click", () => (x.dataset.go === "translator" ? openTranslator() : openPanel(x.dataset.go))));
       break;
     }
     case "guide":
@@ -876,7 +1009,7 @@ const GUIDE = [
   ], ["今天的行程和天氣？"]],
   ["⏰", "提醒", "時間到在群組通知全家", [
     "在聊天說「<b>幾月幾號 幾點 提醒大家…</b>」，AI 會設好提醒。",
-    "也可以到 🧰 → ⏰ 提醒，選日期時間、打內容，按「新增提醒」。",
+    "也可以到下方「工具箱」→ 提醒，選日期時間、打內容，按「新增提醒」。",
     "時間到了，AI 會在群組發訊息通知全家。時間一律是<b>東京時間</b>（比台灣快 1 小時）。",
     "在 ⏰ 提醒頁可以看到還沒發的提醒，也可以刪除。",
   ], ["10/4 早上 9:30 提醒大家出門去藤子博物館", "有哪些提醒？"]],
@@ -893,37 +1026,37 @@ const GUIDE = [
     "2 大 2 小可以坐一台一般計程車。",
   ], ["從住宿叫車到東京迪士尼海洋要多少錢？"]],
   ["🚆", "電車狀況", "出門前查有沒有延誤、停駛", [
-    "按輸入框上方的快捷鈕「<b>🚆 電車狀況</b>」，或直接問某條線。",
+    "按快捷列的「更多」→「<b>電車狀況</b>」，或直接問某條線。",
     "查的是 Yahoo!路線 的即時運行資訊，會告訴你有沒有延誤、停駛與原因。",
     "如果停駛，可以接著問「那要怎麼改走？」。",
   ], ["有樂町線、山手線現在有延誤嗎？"]],
   ["🧾", "收據記帳", "拍收據，AI 幫你記帳", [
-    "按快捷鈕「<b>🧾 收據記帳</b>」→ 拍照或選收據照片。",
+    "按快捷列的「<b>收據</b>」→ 拍照或選收據照片。",
     "輸入框會自動填好「幫我把這張收據記帳（我付的）」；如果是別人付的，改成「媽媽付的」再送出。",
     "AI 會讀出店名、金額，記到 💰 記帳分帳裡。",
     "沒有收據也可以用打字的。按 💰 可以看帳目，AI 也能算誰該給誰多少。",
   ], ["午餐拉麵 3200 日圓，爸爸付的", "目前花了多少錢？大家要怎麼分？"]],
   ["✅", "共用清單", "購物、行李、待辦，全家同步", [
-    "到 🧰 → ✅ 清單，分成<b>購物、行李、待辦</b>三頁。",
+    "到下方「工具箱」→ 共用清單，分成<b>購物、行李、待辦</b>三頁。",
     "一行打一項，可以填「給誰」；完成後打勾，全家的畫面都會同步。",
     "也可以在聊天請 AI 加：要明確說「<b>加入清單</b>」才會加，只是說想買或問推薦不會自動加。",
   ], ["把皮卡丘玩偶加入購物清單，給哥哥", "護照已經帶好了，幫我打勾"]],
   ["🎫", "票券保管箱", "門票、訂位確認，沒網路也能看", [
-    "到 🧰 → 🎫 票券，輸入名稱、選照片，按「上傳」。",
+    "到下方「工具箱」→ 票券保管箱，輸入名稱、選照片，按「上傳」。",
     "也可以在聊天傳照片，說「存成票券」。",
     "要用的時候點圖片放大，給工作人員掃 QR Code。",
     "<b>打開過一次之後，沒網路也能看</b>。建議出發前先把每張都點開一次。",
   ], ["給我看藤子博物館的門票"]],
   ["🗺", "家人位置地圖", "看大家在哪，走散一鍵求救", [
-    "到 🧰 → 🗺 家人位置，地圖上會顯示每個人最後的位置和住宿 🏠。",
-    "按「📍 更新我的位置」分享你現在的位置；在 ⚙️ 設定開「自動分享位置」，就會每 5 分鐘自動更新。",
+    "到下方「工具箱」→ 家人位置，地圖上會顯示每個人最後的位置和住宿 🏠。",
+    "按「📍 更新我的位置」分享你現在的位置；在下方「設定」開「自動分享位置」，就會每 5 分鐘自動更新。",
     "走散了就按「<b>🆘 我走散了</b>」，你的位置會傳到群組，全家畫面會跳出紅色提示（Android 還會震動），點一下就能看地圖。",
     "AI 也會幫忙找好認的集合地點。",
   ], ["大家現在在哪裡？"]],
   ["📔", "旅遊日記", "每晚自動寫，可匯出相簿", [
     "旅程期間每晚<b>東京時間 22:00</b>，AI 會用當天的聊天和照片寫一篇日記，發到群組。",
     "白天多傳照片、聊聊發生了什麼事，日記就會寫得越豐富。",
-    "到 🧰 → 📔 旅遊日記 可以看每一天的日記。",
+    "到下方「工具箱」→ 旅遊日記 可以看每一天的日記。",
     "按「📖 打開相簿」可以列印或存成 PDF，回國後留作紀念。",
   ], []],
 ];
@@ -982,7 +1115,7 @@ function renderMapPanel(st, b) {
     <div class="list card">
       ${locs.length
         ? locs.map((l) => `<div class="item small"><span><b>${escapeHtml(l.name)}</b>　${escapeHtml(l.area || "")}</span><span class="muted">${Math.max(0, Math.round((Date.now() - l.ts) / 60000))} 分鐘前</span></div>`).join("")
-        : `<div class="small muted">還沒有人分享位置。按下面的按鈕分享，或在 ⚙️ 設定開啟「自動分享位置」。</div>`}
+        : `<div class="small muted">還沒有人分享位置。按下面的按鈕分享，或在下方「設定」開啟「自動分享位置」。</div>`}
     </div>
     <div class="row" style="gap:8px">
       <button class="btn" id="map-share" style="flex:1">📍 更新我的位置</button>
@@ -1251,10 +1384,10 @@ $("#showcase-close").addEventListener("click", () => els.showcase.close());
 
 // ---------- 開關與分頁 ----------
 
-$("#tr-open").addEventListener("click", () => {
+function openTranslator() {
   renderTranslator();
   if (!els.translator.open) els.translator.showModal();
-});
+}
 $("#tr-close").addEventListener("click", () => {
   TR.rec?.stop();
   els.translator.close();

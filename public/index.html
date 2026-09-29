@@ -4,12 +4,14 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
   <title>東京旅伴</title>
-  <meta name="theme-color" content="#c8102e" />
+  <meta name="theme-color" content="#F4EEE3" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-title" content="東京旅伴" />
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="/icon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=LXGW+WenKai+TC:wght@700&amp;display=swap" />
   <link rel="stylesheet" href="/style.css" />
   <script src="/vendor/marked.min.js" defer></script>
   <script src="/vendor/purify.min.js" defer></script>
@@ -36,21 +38,14 @@
   <!-- 主畫面 -->
   <section id="app" class="app" hidden>
     <header class="topbar">
-      <div class="topbar-main">
-        <div class="day-badge" id="day-badge">Day –</div>
-        <div class="topbar-text">
-          <div class="today-title" id="today-title">東京旅伴</div>
-          <div class="online" id="online"></div>
-        </div>
+      <div class="topbar-text">
+        <div class="today-title" id="today-title">東京旅伴</div>
+        <div class="topbar-sub"><b id="day-badge"></b><span id="online" class="online"></span></div>
       </div>
-      <nav class="topbar-actions">
-        <button data-panel="itinerary" title="行程">📅</button>
-        <button data-panel="expenses" title="記帳">💰</button>
-        <button data-panel="hub" title="工具箱">🧰</button>
-        <button data-panel="settings" title="設定">⚙️</button>
-      </nav>
+      <div class="avatars" id="avatars" aria-hidden="true"></div>
     </header>
 
+    <button type="button" id="next-card" class="next-card" hidden></button>
     <div id="conn" class="conn" hidden>連線中…</div>
     <div id="sos-banner" class="sos-banner" hidden></div>
 
@@ -59,37 +54,37 @@
     </main>
 
     <footer class="composer">
-      <div class="chips" id="chips">
-        <button data-q="今天的行程和天氣？">📅 今天</button>
-        <button data-q="我附近有什麼好吃的？">🍜 附近美食</button>
-        <button data-receipt>🧾 收據記帳</button>
-        <button data-q="有樂町線、山手線現在有延誤嗎？">🚆 電車狀況</button>
-        <button data-q="現在日圓匯率多少？1000 日圓等於多少台幣？">💱 匯率</button>
-        <button data-q="迪士尼現在哪些設施排隊最少？">🏰 迪士尼排隊</button>
-        <button data-q="目前花了多少錢？大家要怎麼分？">💰 帳目</button>
-        <button data-q="我要怎麼回住宿？">🏠 回住宿</button>
-        <button data-panel="tickets" class="chip-panel">🎫 票券</button>
-        <button data-panel="map" class="chip-panel">🗺 家人位置</button>
-        <button data-panel="checklist" class="chip-panel">✅ 清單</button>
-        <button data-panel="reminders" class="chip-panel">⏰ 提醒</button>
-        <button data-panel="diary" class="chip-panel">📔 旅遊日記</button>
-        <button data-panel="memories" class="chip-panel">🧠 長期記憶</button>
-        <button data-panel="guide" class="chip-panel">📖 使用說明</button>
-      </div>
+      <div class="chips" id="chips"></div>
       <div id="attach" class="attach" hidden>
         <img id="attach-img" alt="" />
         <span id="attach-loc"></span>
-        <button id="attach-clear" class="icon" title="移除">✕</button>
+        <button id="attach-clear" class="icon" aria-label="移除附件">✕</button>
       </div>
       <form id="send-form" class="send-row">
-        <label class="icon" title="拍照／上傳照片">📷<input id="photo-input" type="file" accept="image/*" hidden /></label>
-        <button type="button" id="loc-btn" class="icon" title="附上目前位置">📍</button>
-        <button type="button" id="tr-open" class="icon" title="中日翻譯">🇯🇵</button>
-        <textarea id="input" rows="1" placeholder="問旅伴 AI 任何事…" enterkeyhint="send"></textarea>
-        <button type="submit" class="send" id="send-btn" title="送出">➤</button>
+        <label class="round-btn" aria-label="拍照或選照片"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg><input id="photo-input" type="file" accept="image/*" hidden /></label>
+        <textarea id="input" rows="1" placeholder="問旅伴 AI 任何事…" enterkeyhint="send" aria-label="訊息"></textarea>
+        <button type="submit" class="send" id="send-btn" aria-label="送出"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg></button>
       </form>
     </footer>
+
+    <nav class="tabbar" id="tabbar" aria-label="主選單">
+      <button data-tab="chat" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>聊天</button>
+      <button data-tab="itinerary"><svg viewBox="0 0 24 24" aria-hidden="true"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>行程</button>
+      <button data-tab="expenses"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></svg>記帳</button>
+      <button data-tab="hub"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/><rect width="20" height="14" x="2" y="6" rx="2"/></svg>工具箱</button>
+      <button data-tab="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/></svg>設定</button>
+    </nav>
   </section>
+
+  <!-- 「更多」：傳給 AI 的動作與常用問法 -->
+  <dialog id="more" class="sheet" aria-label="更多功能">
+    <div class="sheet-handle"></div>
+    <div class="sheet-head"><h2>想請 AI 幫什麼？</h2><button class="icon" id="more-close" aria-label="關閉">✕</button></div>
+    <div class="sheet-label">直接傳給 AI</div>
+    <div class="action-grid" id="more-actions"></div>
+    <div class="sheet-label">常用問法</div>
+    <div class="ask-list" id="more-asks"></div>
+  </dialog>
 
   <!-- 面板 -->
   <dialog id="panel" class="panel">
