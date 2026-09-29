@@ -1340,7 +1340,8 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
   private async runAgent(trigger: MessageRow, user: Attachment) {
     const id = newId();
     const settings = this.settings();
-    const primary = settings.provider === "workers-ai" || !settings.hasGemini ? "workers-ai" : "gemini";
+    // 附了照片就一律先用 Gemini（看圖辨識比 Gemma 準很多），額度滿了或沒設金鑰才退回 Gemma
+    const primary = settings.hasGemini && (trigger.photo_id || settings.provider !== "workers-ai") ? "gemini" : "workers-ai";
     // 主要 → 備援 → 最後防線（Gemini 另一個模型額度分開算；避免 Gemini 塞車又遇到 Workers AI 每日額度用完時全掛）
     const order =
       primary === "gemini" ? ["gemini", "workers-ai", "gemini-backup"]
