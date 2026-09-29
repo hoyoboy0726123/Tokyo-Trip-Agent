@@ -230,7 +230,12 @@ export function parseArgs(raw: string): Record<string, unknown> {
 
 /** Gemma 偶爾把對話樣板的標記（開頭的 thought、<channel|>）混進回答，清掉 */
 function cleanModelText(s: string): string {
-  return s.replace(CHANNEL_TAG, "").replace(/^\s*thought\s*\n/, "").replace(/^\s+/, "");
+  // 整段思考過程漏出來（thought … <channel|> 正式回答）：只留正式回答；沒有正式回答就當作沒回，讓上層請它重答
+  if (/^[\s:<|>/a-z]{0,16}thought/i.test(s.slice(0, 24)) && /Thinking Process|思考過程|\*\*Analyze/i.test(s.slice(0, 400))) {
+    const close = s.lastIndexOf("<channel|>");
+    s = close >= 0 ? s.slice(close + "<channel|>".length) : "";
+  }
+  return s.replace(CHANNEL_TAG, "").replace(/^\s*:?thought\s*\n/, "").replace(/^\s+/, "");
 }
 
 /** Workers AI 串流（SSE）：同時支援 OpenAI 格式（choices[].delta）與舊格式（response） */

@@ -140,6 +140,23 @@ input, textarea, select { font: inherit; color: inherit; }
 .gallery figcaption b { color: var(--ink); }
 .gallery figcaption a { color: var(--muted); }
 .tool-chip { display: inline-flex; align-items: center; background: var(--red-soft); color: var(--red-ink); border-radius: 10px; padding: 2px 8px; font-size: 12px; font-weight: 700; }
+/* 確認卡片：虛線框＝還沒寫入，處理完變實線淡化 */
+.draft { border: 1.5px dashed var(--stamp); border-radius: 14px; padding: 10px 12px; background: var(--bg); }
+.draft.settled { border-style: solid; border-color: var(--line); }
+.draft-head { display: flex; align-items: baseline; gap: 8px; font-size: 14.5px; }
+.draft-head b { color: var(--stamp); }
+.draft.settled .draft-head b { color: var(--muted); }
+.draft-no { margin-left: auto; font-size: 11.5px; color: var(--muted); }
+.draft dl { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; margin: 8px 0 10px; font-size: 14px; }
+.draft dt { color: var(--muted); }
+.draft dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.draft dd.warn { color: var(--danger); }
+.draft dd small { display: block; font-weight: 400; font-size: 12px; color: var(--muted); text-decoration: line-through; }
+.draft-actions { display: flex; gap: 8px; }
+.draft-actions button { flex: 1; height: 42px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); color: var(--ink); font: inherit; font-size: 15px; font-weight: 700; }
+.draft-actions button.ok { flex: 2; background: var(--red); border-color: transparent; color: #fff; }
+.draft-actions button:disabled { opacity: .5; }
+.draft-state { font-size: 13px; font-weight: 700; color: var(--muted); }
 .typing span { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); margin: 0 2px; animation: blink 1.2s infinite both; }
 .typing span:nth-child(2) { animation-delay: .2s; }
 .typing span:nth-child(3) { animation-delay: .4s; }

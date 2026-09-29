@@ -252,8 +252,13 @@ function handle(m) {
       TR.history = m.items;
       if (els.translator.open && TR.tab === "history") renderTranslator();
       break;
+    case "draft":
+      document.querySelectorAll(`[data-draft="${m.draft.id}"]`).forEach((el) => (el.outerHTML = draftHtml(m.draft)));
+      break;
     case "action_result":
       if (m.action === "translate" || m.action === "add_phrase") trActionDone(m);
+      // 卡片按了但失敗（例如別人已經處理過）：把按鈕恢復，畫面會跟著伺服器的狀態更新
+      if (!m.ok && (m.action === "draft_confirm" || m.action === "draft_cancel")) document.querySelectorAll(".draft-actions button:disabled").forEach((x) => (x.disabled = false));
       if (!m.ok && m.error) alert(m.error);
       else if (m.ok && m.action === "reset") alert("已清除 ✅");
       break;
@@ -306,6 +311,7 @@ function messageNode(msg) {
         <span class="ai-tools">${(msg.meta?.tools ?? []).map(toolBadge).join("")}</span>
         <span class="ai-time">${timeText(msg.ts)}${provider ? ` · ${provider}` : ""}</span></div>
       <div class="ai-body rich">${body}</div>
+      ${(msg.drafts ?? []).map(draftHtml).join("")}
     </div>`;
   } else if (isMe) {
     node.innerHTML = `<div class="bubble-wrap"><div class="bubble rich">${body}</div><div class="meta">${timeText(msg.ts)}</div></div>`;
@@ -316,6 +322,34 @@ function messageNode(msg) {
   node.querySelectorAll("img.photo").forEach((img) => img.addEventListener("click", () => openViewer(img.src)));
   return node;
 }
+
+// ---------- 確認卡片：AI 要記帳、改行程、刪除時，先列出內容，成員按確認才寫入 ----------
+
+const DRAFT_STATE = { done: (d) => `✅ ${d.resolved_by} 已確認`, cancelled: (d) => `已取消（${d.resolved_by}）`, superseded: () => "已改用新的卡片", failed: () => "資料已經不在，沒有執行" };
+
+function draftHtml(d) {
+  const p = d.preview || {};
+  const rows = (p.rows || [])
+    .map(([k, v, old]) => `<dt>${escapeHtml(k)}</dt><dd${k.startsWith("⚠️") ? ' class="warn"' : ""}>${escapeHtml(v)}${old ? `<small>原本：${escapeHtml(old)}</small>` : ""}</dd>`)
+    .join("");
+  const foot = d.status === "pending"
+    ? `<div class="draft-actions"><button type="button" class="ok" data-draft-act="confirm">${escapeHtml(p.confirm || "確認")}</button><button type="button" data-draft-act="cancel">取消</button></div>`
+    : `<div class="draft-state">${escapeHtml((DRAFT_STATE[d.status] ?? (() => d.status))(d))}</div>`;
+  return `<div class="draft${d.status === "pending" ? "" : " settled"}" data-draft="${d.id}">
+    <div class="draft-head"><b>${escapeHtml(p.title || "請確認")}</b><span class="draft-no">#${d.id}・${d.status === "pending" ? "還沒寫入" : "已處理"}</span></div>
+    <dl>${rows}</dl>${foot}</div>`;
+}
+
+els.messages.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-draft-act]");
+  if (!b) return;
+  const id = Number(b.closest("[data-draft]").dataset.draft);
+  const confirmIt = b.dataset.draftAct === "confirm";
+  b.closest(".draft-actions").querySelectorAll("button").forEach((x) => (x.disabled = true));
+  if (!wsSend({ type: "action", action: confirmIt ? "draft_confirm" : "draft_cancel", id })) {
+    b.closest(".draft-actions").querySelectorAll("button").forEach((x) => (x.disabled = false));
+  }
+});
 
 function daySeparator(ts) {
   const d = dayText(ts);

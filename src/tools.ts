@@ -19,10 +19,24 @@ export interface RoomApi {
   reminderAdd(due: number, message: string, author: string): unknown;
   reminderList(): unknown;
   reminderDelete(id: number): boolean;
+  reminderGet(id: number): { id: number; time: string; message: string } | null;
+  itineraryDay(date: string): { title: string; detail: string; status: string } | null;
+  expenseGet(id: number): ExpenseBrief | null;
+  /** 品項關鍵字找帳（空字串＝最近的幾筆） */
+  expenseFind(keyword: string): ExpenseBrief[];
   documentSave(title: string, note: string, photoId: string, author: string): unknown;
   documentFind(keyword?: string): { id: number; title: string; note: string; photo_id: string; author: string; ts: number }[];
   cacheGet(key: string, maxAgeMs: number): string | null;
   cacheSet(key: string, value: string): void;
+}
+
+export interface ExpenseBrief {
+  id: number;
+  date: string;
+  description: string;
+  amount: number;
+  currency: string;
+  payer: string;
 }
 
 export interface ExpenseInput {
@@ -54,6 +68,31 @@ export interface ToolContext {
   photoId?: string | null;
   /** 工具找到的圖片，會附在這次 AI 回答下方 */
   attachImage?: (img: AttachedImage) => void;
+  /** AI 發起的寫入（記帳、改行程、刪除）先做成確認卡片，成員按確認才寫入；畫面上手動操作沒有這個，直接寫 */
+  propose?: (d: DraftInput) => unknown;
+}
+
+/** 要成員按確認才會執行的動作 */
+export type DraftKind = "add_expense" | "update_itinerary" | "delete_expense" | "delete_reminder";
+export const DRAFT_TOOLS = new Set<string>(["add_expense", "update_itinerary", "delete_expense", "delete_reminder"]);
+
+export interface DraftInput {
+  kind: DraftKind;
+  /** 確認後原封不動拿去寫入的資料 */
+  payload: unknown;
+  /** 卡片內容：rows 是 [欄位, 新值, 原本的值?]；summary 給系統提示與對話紀錄用 */
+  preview: { title: string; confirm: string; summary: string; rows: [string, string, string?][] };
+  /** 取代還沒確認的舊卡片 */
+  replaces?: number;
+  /** 要 AI 特別提醒成員的地方 */
+  warning?: string;
+}
+
+const REPLACES_PARAM = { type: "integer", description: "修正還沒確認的卡片時，填那張卡片的編號（見系統提示「等待成員確認的卡片」）" };
+
+function money(amount: number, currency: string): string {
+  const n = Number(amount).toLocaleString("en-US", { maximumFractionDigits: Math.abs(amount) >= 100 ? 0 : 2 });
+  return currency === "JPY" ? `¥${n}` : currency === "TWD" ? `NT$${n}` : `${n} ${currency}`;
 }
 
 type Executor = (args: any, ctx: ToolContext) => Promise<unknown>;
@@ -706,17 +745,18 @@ export const TOOLS: Tool[] = [
     label: "💰 記帳",
     decl: {
       name: "add_expense",
-      description: "記一筆旅費並分帳。例如「晚餐 8400 日圓我付的」。payer 預設為發問者，split_among 預設為全部旅伴（見系統提示的旅伴名單），只有特定人分攤時才填。",
+      description: "記一筆旅費並分帳。例如「晚餐 8400 日圓我付的」。payer 預設為發問者，split_among 預設為全部旅伴（見系統提示的旅伴名單），只有特定人分攤時才填，成員說誰就照填誰（名單裡沒有也照填，不可以換成別人）。",
       parameters: {
         type: "object",
         properties: {
           description: { type: "string" },
           amount: { type: "number" },
-          currency: { type: "string", description: "JPY 或 TWD，預設 JPY" },
+          currency: { type: "string", description: "JPY 或 TWD，預設 JPY；台灣的收據（NT$、民國年、統一發票）是 TWD" },
           payer: { type: "string" },
           split_among: { type: "array", items: { type: "string" } },
           category: { type: "string", enum: ["餐飲", "交通", "門票", "購物", "住宿", "其他"] },
-          date: { type: "string", description: "日期，預設今天（東京時間）" },
+          date: { type: "string", description: "日期 YYYY-MM-DD，預設今天（東京時間）。收據上的民國年要加 1911（民國 113 年＝2024 年）；令和 N 年＝2018+N 年（令和 7 年＝2025 年）" },
+          replaces: REPLACES_PARAM,
         },
         required: ["description", "amount"],
       },
@@ -731,7 +771,7 @@ export const TOOLS: Tool[] = [
       const twd = Math.round(jpy * toTwd.rate);
       const members = ctx.room.members();
       const split = Array.isArray(args.split_among) && args.split_among.length ? args.split_among : members.length ? members : [ctx.author];
-      const saved = ctx.room.addExpense({
+      const e: ExpenseInput = {
         description: args.description,
         amount,
         currency,
@@ -742,8 +782,36 @@ export const TOOLS: Tool[] = [
         category: args.category || "其他",
         date: normalizeDate(args.date) ?? jstDate(),
         author: ctx.author,
-      });
-      return { saved, rate_estimated: toJpy.estimated || toTwd.estimated };
+      };
+      const rateEstimated = toJpy.estimated || toTwd.estimated;
+      if (ctx.propose) {
+        // 日期離旅程太遠（例如兩年前在台灣的收據）特別標出來，幣別也最容易在這種時候看錯；出發前幾個月先買票是正常的
+        const shift = (d: string, days: number) => new Date(Date.parse(d + "T00:00:00Z") + days * 86400_000).toISOString().slice(0, 10);
+        const outside = e.date < shift(TRIP.startDate, -90) || e.date > shift(TRIP.endDate, 14);
+        const warn = outside ? `日期離旅遊期間（${TRIP.startDate}～${TRIP.endDate.slice(5)}）很遠，請確認日期與幣別` : "";
+        const other = currency === "JPY" ? `≈ NT$${twd.toLocaleString("en-US")}` : currency === "TWD" ? `≈ ¥${jpy.toLocaleString("en-US")}` : `≈ ¥${jpy.toLocaleString("en-US")}｜NT$${twd.toLocaleString("en-US")}`;
+        return ctx.propose({
+          kind: "add_expense",
+          payload: e,
+          replaces: Number(args.replaces) || undefined,
+          preview: {
+            title: "記帳確認",
+            confirm: "確認記帳",
+            summary: `${e.date} ${e.description} ${money(amount, currency)}（${e.payer} 付，${split.length} 人分）`,
+            rows: [
+              ["日期", e.date],
+              ["項目", String(e.description)],
+              ["金額", `${money(amount, currency)}（${other}${rateEstimated ? "，匯率為估計值" : ""}）`],
+              ["付款人", String(e.payer)],
+              ["分攤", `${split.join("、")}（每人約 NT$${Math.round(twd / split.length).toLocaleString("en-US")}）`],
+              ["分類", e.category],
+              ...(warn ? [["⚠️ 注意", warn] as [string, string]] : []),
+            ],
+          },
+          warning: warn || undefined,
+        });
+      }
+      return { saved: ctx.room.addExpense(e), rate_estimated: rateEstimated };
     },
   },
   {
@@ -761,11 +829,34 @@ export const TOOLS: Tool[] = [
     label: "🗑 刪除帳目",
     decl: {
       name: "delete_expense",
-      description: "刪除記錯的一筆帳（用 expense_summary 裡的 id）。",
-      parameters: { type: "object", properties: { id: { type: "integer" } }, required: ["id"] },
+      description: "刪除已經記進帳本的一筆帳。可以用品項關鍵字（例如「拉麵」）找，或用 expense_summary 裡的帳目 id（不是確認卡片的編號）。",
+      parameters: {
+        type: "object",
+        properties: { keyword: { type: "string", description: "品項或店名關鍵字" }, id: { type: "integer", description: "帳目 id" } },
+      },
     },
-    async run(args, { room }) {
-      return { deleted: room.deleteExpense(Number(args.id)) };
+    async run(args, { room, propose }) {
+      let ex = args.id ? room.expenseGet(Number(args.id)) : null;
+      if (!ex && args.keyword) {
+        const found = room.expenseFind(String(args.keyword));
+        if (found.length > 1) return { matches: found, note: "有好幾筆符合，請問成員要刪哪一筆，再用 id 呼叫" };
+        ex = found[0] ?? null;
+      }
+      if (!ex) return { error: "帳本裡找不到這筆帳（還沒確認的卡片不在帳本裡，請成員直接按卡片上的「取消」）", recent: room.expenseFind("").slice(0, 8) };
+      const id = ex.id;
+      if (propose) {
+        return propose({
+          kind: "delete_expense",
+          payload: { id },
+          preview: {
+            title: "刪除帳目確認",
+            confirm: "確認刪除",
+            summary: `刪除 #${id} ${ex.date} ${ex.description} ${money(ex.amount, ex.currency)}`,
+            rows: [["日期", ex.date], ["項目", ex.description], ["金額", money(ex.amount, ex.currency)], ["付款人", ex.payer]],
+          },
+        });
+      }
+      return { deleted: room.deleteExpense(id) };
     },
   },
   {
@@ -824,14 +915,32 @@ export const TOOLS: Tool[] = [
           title: { type: "string" },
           detail: { type: "string" },
           status: { type: "string", description: "例如 ✅ 已購票、⚠️ 尚未購票、彈性" },
+          replaces: REPLACES_PARAM,
         },
         required: ["date"],
       },
     },
-    async run(args, { room, author }) {
+    async run(args, { room, author, propose }) {
       const date = normalizeDate(args.date);
       if (!date) return { error: "看不懂日期，請用 10/9 或 2026-10-09" };
-      return room.updateItinerary(date, { title: args.title, detail: args.detail, status: args.status }, author);
+      const fields = { title: args.title, detail: args.detail, status: args.status };
+      if (propose) {
+        const cur = room.itineraryDay(date);
+        const rows: [string, string, string?][] = [["日期", date]];
+        for (const [k, label] of [["title", "標題"], ["detail", "細節"], ["status", "狀態"]] as const) {
+          const v = fields[k];
+          if (v == null || String(v) === (cur?.[k] ?? "")) continue;
+          rows.push([label, String(v), cur?.[k] || undefined]);
+        }
+        if (rows.length === 1) return { unchanged: true, note: "內容和目前的行程一樣，不需要修改" };
+        return propose({
+          kind: "update_itinerary",
+          payload: { date, fields, author },
+          replaces: Number(args.replaces) || undefined,
+          preview: { title: "修改行程確認", confirm: "確認修改", summary: `${date} ${fields.title ?? cur?.title ?? ""}`.trim(), rows },
+        });
+      }
+      return room.updateItinerary(date, fields, author);
     },
   },
   {
@@ -1026,8 +1135,18 @@ export const TOOLS: Tool[] = [
       description: "刪除一個提醒（用 list_reminders 的 id）。",
       parameters: { type: "object", properties: { id: { type: "integer" } }, required: ["id"] },
     },
-    async run(args, { room }) {
-      return { deleted: room.reminderDelete(Number(args.id)) };
+    async run(args, { room, propose }) {
+      const id = Number(args.id);
+      const r = room.reminderGet(id);
+      if (!r) return { error: `找不到 #${id} 這個提醒（可能已經通知過），請先用 list_reminders 確認 id` };
+      if (propose) {
+        return propose({
+          kind: "delete_reminder",
+          payload: { id },
+          preview: { title: "刪除提醒確認", confirm: "確認刪除", summary: `刪除提醒 #${id} ${r.time} ${r.message}`, rows: [["時間", r.time], ["內容", r.message]] },
+        });
+      }
+      return { deleted: room.reminderDelete(id) };
     },
   },
   {
