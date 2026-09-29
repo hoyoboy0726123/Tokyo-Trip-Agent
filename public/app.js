@@ -4,7 +4,7 @@ const els = {
   login: $("#login"), loginForm: $("#login-form"), loginName: $("#login-name"), loginPassword: $("#login-password"), loginError: $("#login-error"),
   app: $("#app"), messages: $("#messages"), loadMore: $("#load-more"), conn: $("#conn"),
   dayBadge: $("#day-badge"), todayTitle: $("#today-title"), online: $("#online"), avatars: $("#avatars"), chips: $("#chips"),
-  nextCard: $("#next-card"), tabbar: $("#tabbar"), more: $("#more"), moreActions: $("#more-actions"), moreAsks: $("#more-asks"),
+  nextCard: $("#next-card"), ncToggle: $("#nc-toggle"), chipsToggle: $("#chips-toggle"), tabbar: $("#tabbar"), more: $("#more"), moreActions: $("#more-actions"), moreAsks: $("#more-asks"),
   input: $("#input"), sendForm: $("#send-form"), sendBtn: $("#send-btn"), photoInput: $("#photo-input"),
   attach: $("#attach"), attachImg: $("#attach-img"), attachLoc: $("#attach-loc"), attachClear: $("#attach-clear"),
   panel: $("#panel"), panelTitle: $("#panel-title"), panelBody: $("#panel-body"), panelClose: $("#panel-close"),
@@ -494,6 +494,30 @@ function renderChips() {
   els.chips.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => chips[Number(b.dataset.i)][2]()));
 }
 
+/** 這支手機的顯示偏好；無痕模式存不了就用預設（收起） */
+function pref(key, on) {
+  try {
+    if (on === undefined) return localStorage.getItem(key) === "1";
+    localStorage.setItem(key, on ? "1" : "0");
+  } catch {}
+  return false;
+}
+
+// 快捷列預設收起，讓聊天區多一點空間；按「＋」展開，展開與否記在這支手機
+function showChips(show) {
+  els.chips.hidden = !show;
+  els.chipsToggle.setAttribute("aria-expanded", String(show));
+  els.chipsToggle.setAttribute("aria-label", show ? "收起快捷功能" : "展開快捷功能");
+}
+showChips(pref("tta-show-chips"));
+els.chipsToggle.addEventListener("click", () => {
+  const show = els.chips.hidden;
+  const stick = nearBottom();
+  pref("tta-show-chips", show);
+  showChips(show);
+  scrollToBottom(stick);
+});
+
 // ---------- 「更多」：傳給 AI 的動作與常用問法 ----------
 
 const MORE_ASKS = ["明天的行程和天氣？", "目前花了多少錢？大家要怎麼分？", "最近東京有地震或颱風嗎？會影響行程嗎？"];
@@ -669,12 +693,24 @@ function renderNextCard(state, now) {
     title = today?.title || "自由活動";
     sub = today?.detail || today?.status || "";
   } else {
-    els.nextCard.hidden = true;
+    els.nextCard.hidden = els.ncToggle.hidden = true;
     return;
   }
   els.nextCard.innerHTML = `<span class="nc-main"><span class="nc-label">${escapeHtml(label)}</span><span class="nc-title">${escapeHtml(title)}</span>${sub ? `<span class="nc-sub">${escapeHtml(sub)}</span>` : ""}</span><span class="nc-side">${svg("calendar")}行程</span>`;
-  els.nextCard.hidden = false;
+  els.ncToggle.hidden = false;
+  showNextCard(pref("tta-show-next"));
 }
+
+// 「下一站」卡片預設收起，按標題列的「下一站」才顯示，再按一次收起
+function showNextCard(show) {
+  els.nextCard.hidden = !show;
+  els.ncToggle.setAttribute("aria-pressed", String(show));
+}
+els.ncToggle.addEventListener("click", () => {
+  const show = els.nextCard.hidden;
+  pref("tta-show-next", show);
+  showNextCard(show);
+});
 els.nextCard.addEventListener("click", () => openPanel("itinerary"));
 
 function geminiUsageText(g) {
@@ -1060,12 +1096,12 @@ const GUIDE = [
     "2 大 2 小可以坐一台一般計程車。",
   ], ["從住宿叫車到東京迪士尼海洋要多少錢？"]],
   ["🚆", "電車狀況", "出門前查有沒有延誤、停駛", [
-    "按快捷列的「更多」→「<b>電車狀況</b>」，或直接問某條線。",
+    "按輸入框左邊的「＋」→「更多」→「<b>電車狀況</b>」，或直接問某條線。",
     "查的是 Yahoo!路線 的即時運行資訊，會告訴你有沒有延誤、停駛與原因。",
     "如果停駛，可以接著問「那要怎麼改走？」。",
   ], ["有樂町線、山手線現在有延誤嗎？"]],
   ["🧾", "收據記帳", "拍收據，AI 幫你記帳", [
-    "按快捷列的「<b>收據</b>」→ 拍照或選收據照片。",
+    "按輸入框左邊的「＋」→「<b>收據</b>」→ 拍照或選收據照片。",
     "輸入框會自動填好「幫我把這張收據記帳（我付的）」；如果是別人付的，改成「媽媽付的」再送出。",
     "AI 會讀出店名、金額，記到 💰 記帳分帳裡。",
     "沒有收據也可以用打字的。按 💰 可以看帳目，AI 也能算誰該給誰多少。",
