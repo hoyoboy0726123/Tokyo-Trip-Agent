@@ -3,6 +3,7 @@ import { safeEqual } from "./auth";
 import { parseArgs, providerFor, type GeminiGate } from "./providers";
 import { GeminiLimiter, RateLimitedError } from "./ratelimit";
 import { DRAFT_TOOLS, japanAlerts, reverseArea, runTool, SCALE_TEXT, toolLabel, TOOL_DECLS, type AttachedImage, type DraftInput, type ExpenseInput, type RoomApi } from "./tools";
+import { fixMapLinks } from "./maplinks";
 import { looksJapanese, translate, type Lang } from "./translate";
 import { DEFAULT_CHECKLIST, DEFAULT_PHRASES, INITIAL_ITINERARY, TRIP } from "./trip-data";
 import type { Env, Part, Provider, SessionUser, Turn } from "./types";
@@ -993,7 +994,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
 
   /** 以 AI 身分在群組發一則訊息（提醒、早報、日記、警報共用） */
   private postAiMessage(text: string, meta: Record<string, unknown>) {
-    const row = this.insertMessage({ author: AI_NAME, role: "assistant", text, photo_id: null, lat: null, lon: null, meta: JSON.stringify(meta) });
+    const row = this.insertMessage({ author: AI_NAME, role: "assistant", text: fixMapLinks(text), photo_id: null, lat: null, lon: null, meta: JSON.stringify(meta) });
     this.broadcast({ type: "message", message: this.publicMessage(row) });
     return row;
   }
@@ -1287,6 +1288,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 記帳（add_expense）、修改行程（update_itinerary）、刪除帳目或提醒：工具只會在你的回答下方產生確認卡片，要等成員按「確認」才會寫入。呼叫後用一兩句話說明你看到的內容（照片上的店名、日期、金額…）和準備寫入的內容，請成員核對卡片；絕對不要說「已記好／已更新／已刪除」。資料有疑問（日期不在旅遊期間、金額或幣別看不清楚、不確定誰付的）就先直接問成員，等成員回答再呼叫工具。成員要修改還沒確認的卡片，就重新呼叫同一個工具並在 replaces 填舊卡片編號。卡片只能靠呼叫工具產生，不要在回答裡自己寫卡片內容。還沒確認的卡片不用刪，請成員直接按卡片上的「取消」。
 - 提到日圓價格時附上約合台幣（用 convert_currency）。
 - 問路：用 plan_route 給 Google Maps 連結，必要時用 web_search 補充轉乘與票價。
+- 地圖連結：工具回傳的連結可以直接用；其他地點一律寫成 [📍地點名稱](map)，系統會自動換成 Google 地圖搜尋連結（地點名稱用日文或英文的正式名稱，可加地區，例如 [📍ドン・キホーテ 池袋駅西口店](map)）。不要自己寫 Google 地圖網址，絕對不要編 maps.app.goo.gl 短網址，也不要用自己記得的地址或座標當連結（記錯一個字就會指到別的地方）。
 - 成員在哪裡，一律以「成員最近位置」或訊息裡附的地名為準，絕對不要自己猜地名；以前聊天裡說過的位置可能已經過時，不要沿用。
 - 每次有人問「附近」都要重新呼叫工具查詢，不可以沿用之前的回答。
 - 你可以用 find_images 把網路上的圖片直接顯示給成員（照片、捷運／地鐵路線圖、平面圖、菜單…），絕對不要說「無法傳送圖片」。
@@ -1463,7 +1465,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
         }
         if (!finalText.trim()) finalText = images.length ? "幫你找到這些圖片 👇（網路圖片，僅供參考）" : "嗯…我沒有想到好的回答，可以換個方式問我嗎？";
         const row = this.insertMessage({
-          id, author: AI_NAME, role: "assistant", text: finalText, photo_id: null, lat: null, lon: null,
+          id, author: AI_NAME, role: "assistant", text: fixMapLinks(finalText), photo_id: null, lat: null, lon: null,
           meta: JSON.stringify({
             provider: provider.id, model: provider.model, tools: [...new Set(toolsUsed)].map(toolLabel),
             ...(images.length ? { images } : {}),
