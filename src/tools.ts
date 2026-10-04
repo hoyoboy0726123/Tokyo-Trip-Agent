@@ -656,7 +656,8 @@ export const TOOLS: Tool[] = [
             opening_hours: t.opening_hours,
             distance_m: distance,
             walk_min: Math.max(1, Math.round(distance / 80)),
-            map: mapsLink(t.name ? `${t.name} ${lat},${lon}` : { lat, lon }),
+            // 只給座標：店名一起放進搜尋字，模型抄網址時最常把日文編碼抄壞；座標也不會跑到連鎖店的別家分店
+            map: mapsLink({ lat, lon }),
           };
         })
         .sort((a: any, b: any) => a.distance_m - b.distance_m);

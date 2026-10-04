@@ -1,60 +1,30 @@
 /**
- * 模型常自己編 Google 地圖連結：maps.app.goo.gl/亂碼（短網址代碼是 Google 隨機產生的，編的一定打不開；
- * 確定正確的短網址例如房東給的住宿地圖，用 keep 保留）。
- * 回答存檔前把這種連結換成「用地點名稱搜尋」的連結；名稱取連結文字，
- * 連結文字只是「地圖點這裡」時，改取前面最近的粗體或標題裡的地點名稱；找不到名稱就拿掉連結，只留文字。
- * 也順便把搜尋連結裡沒編碼的中日文、空白編好，免得連結在空白處斷掉。
+ * 地圖連結修正（AI 回答存檔前）。模型只要自己寫網址就可能出錯，Gemini 也一樣：
+ * 1. 手動編碼寫壞（「下北�%8�站」、混進奇怪文字）→ 改用連結文字或前面提到的地點名稱
+ * 2. 自己編的地址（記錯號碼就指到別處）→ 有地點名稱就改用名稱搜尋
+ * 3. 編造的短網址 maps.app.goo.gl/亂碼（代碼是 Google 隨機產生的，編的一定打不開）→ 改用地點名稱搜尋；
+ *    確定正確的短網址（例如房東給的住宿地圖）用 keep 保留
+ * 4. 查詢字裡有座標（找附近的結果）→ 直接用座標，位置最準
+ * 5. 提到住宿 → 一律換成正確的住宿位置與導航目的地（home）
+ * 找不到可靠的地點名稱又是亂碼的連結就拿掉，只留文字，不給會帶錯路的連結。
  */
 
 const MAP_SEARCH = "https://www.google.com/maps/search/?api=1&query=";
 const FAKE_MAP = /^https?:\/\/(maps\.app\.goo\.gl|goo\.gl\/maps|g\.co\/kgs)\//i;
 const SEARCH_LINK = /^https?:\/\/(?:www\.)?(?:google\.[a-z.]+\/maps(?:\/search\/)?\/?\?(?:api=1&)?(?:query|q)=|maps\.google\.[a-z.]+\/(?:maps)?\?q=)(.*)$/i;
+const DIR_LINK = /^https?:\/\/(?:www\.)?google\.[a-z.]+\/maps\/dir\//i;
+const MAP_REF = /^map(?::|$)/i;
+/** 查詢字裡的座標（找附近工具給的「店名 緯度,經度」） */
+const COORDS = /(-?\d{1,3}\.\d{3,})\s*,\s*(-?\d{1,3}\.\d{3,})/;
+/** 看起來是模型自己寫的地址 */
+const ADDRESS = /〒|\d+\s*丁目|\d+\s*番地|\d+-\d+-\d+|[都道府県].{1,8}[区市町村郡].{0,10}\d/;
 /** 連結文字只是在說「這是地圖」，不是地點名稱 */
 const GENERIC = /^(google\s*)?(地圖|maps?|導航|連結|位置|地點|路線|link|here|這裡|點這裡|點此|開啟|查看|打開|看|點我|按這裡|請點)+$/i;
 /** 粗體小標（「為什麼必去」「位置」）不是地點名稱 */
-const NOT_PLACE = /為什麼|位置|地址|亮點|交通|營業|時間|價格|費用|推薦|注意|建議|提醒|重點|怎麼|如何|必逛|必吃|必去|特色|說明|小撇步|備註|預算|天氣|^\d/;
-
-function clean(s: string): string {
-  return s
-    .replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, "")
-    .replace(/^[\s#*\d.、)）\-—:：]+/, "")
-    .replace(/[（(—–\-:：|｜].*$/, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-/** 從連結前面的文字找最近的地點名稱（粗體或標題） */
-function nearestPlace(before: string): string | null {
-  const tail = before.slice(-600);
-  const found: { at: number; name: string }[] = [];
-  for (const m of tail.matchAll(/\*\*([^*\n]{2,40})\*\*/g)) found.push({ at: m.index ?? 0, name: m[1] });
-  for (const m of tail.matchAll(/^#{1,4}\s+(.+)$/gm)) found.push({ at: m.index ?? 0, name: m[1] });
-  found.sort((a, b) => b.at - a.at);
-  for (const f of found) {
-    const name = clean(f.name);
-    if (name.length >= 2 && !NOT_PLACE.test(name) && !GENERIC.test(name.replace(/\s/g, ""))) return name;
-  }
-  return null;
-}
-
-function placeFor(label: string, before: string): string | null {
-  const name = clean(label.replace(/google\s*/i, "").replace(/地圖|點這裡|點此開啟|點此|開啟|導航|連結|查看/g, ""));
-  if (name.length >= 2 && !GENERIC.test(name.replace(/\s/g, ""))) return name;
-  return nearestPlace(before);
-}
-
-function decodeQuery(query: string): string {
-  const q = query.trim().replace(/\+/g, " ");
-  try {
-    return decodeURIComponent(q);
-  } catch {
-    return q;
-  }
-}
-
-function searchUrl(query: string): string {
-  return MAP_SEARCH + encodeURIComponent(decodeQuery(query));
-}
+const NOT_PLACE = /為什麼|位置|地址|亮點|交通|營業|時間|價格|費用|推薦|注意|建議|提醒|重點|怎麼|如何|必逛|必吃|必去|特色|說明|小撇步|備註|預算|天氣|抵達|到達|出發|步驟|路線|走法|方向|距離|分鐘|^\d/;
+/** 連結文字或搜尋字只是「民宿／住宿（的位置、導航）」 */
+const HOME_WORDS = /^(我們的?|回)?(民宿|住宿|住的地方|飯店|酒店|旅館)(的)?(位置|地圖|地址|地圖位置|導航|導航連結|路線|門口)?$/;
+const EMOJI = /[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu;
 
 export interface MapFixOptions {
   /** 確定正確的連結（例如房東給的住宿地圖短網址），原封不動 */
@@ -66,11 +36,120 @@ export interface MapFixOptions {
   home?: { names: RegExp | null; search: string; dest: string };
 }
 
-/** 連結文字或搜尋字只是「民宿／住宿（的位置、導航）」 */
-const HOME_WORDS = /^(我們的?|回)?(民宿|住宿|住的地方|飯店|酒店|旅館)(的)?(位置|地圖|地址|地圖位置|導航|導航連結|路線|門口)?$/;
+function clean(s: string): string {
+  return s
+    .replace(EMOJI, "")
+    .replace(/^[\s#*\d.、)）\-—:：]+/, "")
+    .replace(/[（(—–\-:：|｜].*$/, "")
+    .replace(/的$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** 連結文字裡的地點名稱（拿掉「Google 地圖」「點這裡看步行路線」這類字）；只是在說「這是地圖」就回傳 null */
+function labelPlace(label: string): string | null {
+  const name = clean(label.replace(/google\s*|maps?\b/gi, "").replace(/地圖|點這裡|點此開啟|點此|按這裡|點我|開啟|打開|導航|連結|查看|看|步行|走路|大眾運輸|搭車|開車|路線|前往|帶路/g, ""));
+  return name.length >= 2 && !GENERIC.test(name.replace(/\s/g, "")) && !looksBroken(name) ? name : null;
+}
+
+const MAP_URL = (url: string) => FAKE_MAP.test(url) || SEARCH_LINK.test(url) || DIR_LINK.test(url) || MAP_REF.test(url);
+
+/**
+ * 從連結前面的文字找最近的地點名稱（前面的地圖連結文字、粗體、標題）。
+ * 導航連結前面常是「**過馬路**」「**走出大門**」這類步驟小標，所以 preferLinks 時先找前面地圖連結裡的地名
+ */
+function nearestPlace(before: string, preferLinks = false): string | null {
+  const tail = before.slice(-800);
+  const links: { at: number; name: string }[] = [];
+  for (const m of tail.matchAll(/\[([^\]\n]*)\]\(([^)\n]+)\)/g)) {
+    const name = MAP_URL(m[2].trim()) ? labelPlace(m[1]) : null;
+    if (name && !NOT_PLACE.test(name) && !HOME_WORDS.test(name.replace(/\s/g, ""))) links.push({ at: m.index ?? 0, name });
+  }
+  if (preferLinks && links.length) return links[links.length - 1].name;
+  const found = [...links];
+  for (const m of tail.matchAll(/\*\*([^*\n]{2,40})\*\*/g)) found.push({ at: m.index ?? 0, name: m[1] });
+  for (const m of tail.matchAll(/^#{1,4}\s+(.+)$/gm)) found.push({ at: m.index ?? 0, name: m[1] });
+  found.sort((a, b) => b.at - a.at);
+  for (const f of found) {
+    const name = clean(f.name);
+    const bare = name.replace(/\s/g, "");
+    if (name.length >= 2 && !NOT_PLACE.test(name) && !GENERIC.test(bare) && !HOME_WORDS.test(bare) && !looksBroken(name)) return name;
+  }
+  return null;
+}
+
+/** 連結文字裡的地點名稱；只是「地圖點這裡」就往前找 */
+function placeFor(label: string, before: string, preferLinks = false): string | null {
+  return labelPlace(label) ?? nearestPlace(before, preferLinks);
+}
+
+function decodeQuery(query: string): { text: string; ok: boolean } {
+  const q = query.trim().replace(/\+/g, " ");
+  try {
+    return { text: decodeURIComponent(q), ok: true };
+  } catch {
+    return { text: q, ok: false };
+  }
+}
+
+/** 模型手動編碼寫壞的痕跡：替換字元、殘留的 %XX、混進其他語系的文字 */
+function looksBroken(s: string, decodedOk = true): boolean {
+  return (!decodedOk && s.includes("%")) || s.includes("�") || /%[0-9A-Fa-f]{1,2}/.test(s) || /[֐-ࣿऀ-෿]/.test(s);
+}
+
+const searchUrl = (text: string) => MAP_SEARCH + encodeURIComponent(text);
+
+/** 搜尋連結：有座標用座標；亂碼或自編地址改用地點名稱；回傳 null＝沒有可靠的地點，拿掉連結 */
+function fixQuery(raw: string, label: string, before: string): string | null {
+  const { text, ok } = decodeQuery(raw);
+  // 編碼寫壞時座標可能還是「35.73%2C139.70」：放寬比對
+  const c = text.replace(/%2C/gi, ",").replace(/%20/g, " ").match(COORDS);
+  if (c) return searchUrl(`${c[1]},${c[2]}`);
+  const broken = looksBroken(text, ok);
+  if (broken || ADDRESS.test(text)) {
+    const name = placeFor(label, before);
+    if (name) return searchUrl(name);
+    if (broken) return null;
+  }
+  return text.trim() ? searchUrl(text.trim()) : null;
+}
+
+/**
+ * 導航連結：起點、終點是住宿就換成正確地址（模型常抄錯字）；
+ * 目的地有座標保留座標；亂碼或自編地址改用前面提到的地點名稱；起點是亂碼就拿掉（改用目前位置）
+ */
+function fixDirection(url: string, label: string, before: string, home?: MapFixOptions["home"]): string | null {
+  let u: URL;
+  try {
+    u = new URL(url.replace(/ /g, "%20"));
+  } catch {
+    if (home && isHome(home, label, "")) return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(home.dest)}`;
+    const name = nearestPlace(before, true);
+    return name ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(name)}` : null;
+  }
+  const origin = u.searchParams.get("origin");
+  const fromHome = !!home && !!origin && isHome(home, "", origin);
+  if (fromHome) u.searchParams.set("origin", home!.dest);
+  else if (origin && looksBroken(origin)) u.searchParams.delete("origin");
+
+  const dest = u.searchParams.get("destination") ?? "";
+  const c = dest.match(COORDS);
+  if (home && (isHome(home, "", dest) || (!fromHome && isHome(home, label, "")))) {
+    u.searchParams.set("destination", home.dest);
+    // 從住宿導航到住宿沒有意義：起點拿掉，改用目前位置
+    if (fromHome) u.searchParams.delete("origin");
+  }
+  else if (c) u.searchParams.set("destination", `${c[1]},${c[2]}`);
+  else if (looksBroken(dest) || ADDRESS.test(dest)) {
+    const name = placeFor(label, before, true);
+    if (name) u.searchParams.set("destination", name);
+    else if (looksBroken(dest)) return null;
+  }
+  return u.toString();
+}
 
 function linkTarget(url: string): string {
-  if (/^map(?::|$)/i.test(url)) return url.slice(4).trim();
+  if (MAP_REF.test(url)) return url.slice(4).trim();
   try {
     const u = new URL(url.replace(/ /g, "%20"));
     return u.searchParams.get("query") ?? u.searchParams.get("q") ?? u.searchParams.get("destination") ?? "";
@@ -80,18 +159,8 @@ function linkTarget(url: string): string {
 }
 
 function isHome(home: NonNullable<MapFixOptions["home"]>, label: string, target: string): boolean {
-  const bare = (s: string) => s.replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}\s]/gu, "");
+  const bare = (s: string) => s.replace(EMOJI, "").replace(/\s/g, "");
   return !!home.names?.test(label) || !!home.names?.test(target) || HOME_WORDS.test(bare(label)) || HOME_WORDS.test(bare(target));
-}
-
-function withDestination(url: string, dest: string): string {
-  try {
-    const u = new URL(url.replace(/ /g, "%20"));
-    u.searchParams.set("destination", dest);
-    return u.toString();
-  } catch {
-    return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}`;
-  }
 }
 
 export function fixMapLinks(text: string, opts: MapFixOptions = {}): string {
@@ -100,29 +169,30 @@ export function fixMapLinks(text: string, opts: MapFixOptions = {}): string {
   let out = text.replace(/\[([^\]\n]*)\]\(([^)\n]+)\)/g, (whole, label: string, rawUrl: string, offset: number) => {
     const url = rawUrl.trim();
     if (keep.has(url)) return whole;
-    // 提到住宿的連結：位置用正確的連結，導航的目的地換成正確地址（模型自己寫的常跑錯地方）
-    if (opts.home && (FAKE_MAP.test(url) || SEARCH_LINK.test(url) || /\/maps\/dir\//.test(url) || /^map(?::|$)/i.test(url)) && isHome(opts.home, label, linkTarget(url))) {
-      return `[${label}](${/\/maps\/dir\//.test(url) ? withDestination(url, opts.home.dest) : opts.home.search})`;
+    if (!MAP_URL(url)) return whole;
+    const before = text.slice(0, offset);
+    let fixed: string | null;
+    if (DIR_LINK.test(url)) fixed = fixDirection(url, label, before, opts.home);
+    // 提到住宿的位置連結：一律用正確的住宿連結
+    else if (opts.home && isHome(opts.home, label, linkTarget(url))) fixed = opts.home.search;
+    else if (MAP_REF.test(url)) {
+      // 提示詞要模型寫 [📍地點名稱](map)：地名只寫一次，網址由這裡產生
+      const ref = url.slice(4).trim();
+      fixed = ref ? fixQuery(ref, label, before) : (() => { const name = placeFor(label, before); return name ? searchUrl(name) : null; })();
+    } else if (FAKE_MAP.test(url)) {
+      const name = placeFor(label, before);
+      fixed = name ? searchUrl(name) : null;
+    } else {
+      // [網址](網址)：模型把網址抄了兩次，第二次常抄錯；用文字那份
+      const labelUrl = label.trim().match(SEARCH_LINK);
+      if (labelUrl) {
+        const q = fixQuery(labelUrl[1].split("&")[0], "", before);
+        if (!q) return label;
+        return `[📍 ${decodeQuery(new URL(q).searchParams.get("query") ?? "").text}](${q})`;
+      }
+      fixed = fixQuery(url.match(SEARCH_LINK)![1].split("&")[0], label, before);
     }
-    // 提示詞要模型寫 [📍地點名稱](map)：地名只寫一次，網址由這裡產生（Gemma 在網址裡重抄日文常抄錯）
-    if (/^map(?::|$)/i.test(url)) {
-      const place = (url.slice(4).trim() || label).replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, "").trim();
-      return place ? `[${label}](${searchUrl(place)})` : label;
-    }
-    // [網址](網址)：模型把網址抄了兩次，第二次常抄錯；用文字那份，顯示改成地名
-    const labelUrl = label.trim().match(SEARCH_LINK);
-    if (labelUrl && (SEARCH_LINK.test(url) || FAKE_MAP.test(url))) {
-      const name = decodeQuery(labelUrl[1].split("&")[0]);
-      return `[📍 ${name}](${MAP_SEARCH}${encodeURIComponent(name)})`;
-    }
-    if (FAKE_MAP.test(url)) {
-      const place = placeFor(label, text.slice(0, offset));
-      return place ? `[${label}](${searchUrl(place)})` : label;
-    }
-    // 已經編好碼的搜尋連結（工具給的，可能還帶 query_place_id）原封不動；有空白或沒編碼的中日文才重組
-    const s = /[\s\u0080-￿]/.test(url) ? url.match(SEARCH_LINK) : null;
-    if (s) return `[${label}](${searchUrl(s[1].split("&")[0])})`;
-    return whole;
+    return fixed ? `[${label}](${fixed})` : label;
   });
   // 沒包在 Markdown 裡的假短網址
   out = out.replace(/https?:\/\/(?:maps\.app\.goo\.gl|goo\.gl\/maps|g\.co\/kgs)\/[A-Za-z0-9_\-]*/g, (url, offset: number, all: string) => {
