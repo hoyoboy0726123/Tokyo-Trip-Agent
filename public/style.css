@@ -197,7 +197,22 @@ input, textarea, select { font: inherit; color: inherit; }
 .panel { position: fixed; top: 0; left: 0; right: 0; bottom: calc(51px + var(--tabbar-pad)); width: 100%; max-width: none; height: auto; max-height: none; margin: 0; padding: 0; border: 0; border-radius: 0; background: var(--bg); color: var(--ink); overflow-y: auto; z-index: 20; }
 .panel-head { position: sticky; top: 0; display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: calc(env(safe-area-inset-top) + 12px) 16px 10px; background: var(--bg); z-index: 1; }
 .panel-head h2 { margin: 0; font-family: var(--title-font); font-size: 23px; }
-.panel-body { padding: 0 16px 24px; display: grid; gap: 10px; max-width: 680px; margin: 0 auto; }
+.panel-body { padding: 0 16px 24px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; max-width: 680px; margin: 0 auto; }
+/* 旅遊日記頁：每天一張卡片；圖片一律限制在卡片寬度內，避免把整頁撐寬 */
+.diary-top { display: grid; gap: 10px; }
+.diary-top p { margin: 0; }
+.diary-main { display: flex; align-items: center; justify-content: center; gap: 8px; height: 48px; border-radius: 14px; background: var(--red); color: #fff; font-weight: 700; font-size: 16px; text-decoration: none; }
+.diary-main svg { width: 20px; height: 20px; }
+.diary-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.diary-row .btn { height: 44px; display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; color: var(--ink); text-decoration: none; }
+.diary-card { display: grid; gap: 6px; }
+.diary-card a { display: block; overflow: hidden; border-radius: 18px; border: 1px solid var(--line); background: var(--card); color: var(--ink); text-decoration: none; }
+.diary-card img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: var(--line); }
+.diary-card-body { padding: 12px 14px 14px; }
+.diary-kicker { font-size: 12px; font-weight: 700; color: var(--stamp); }
+.diary-card h3 { margin: 4px 0; font-family: var(--title-font); font-size: 20px; line-height: 1.35; }
+.diary-card p { margin: 0; font-size: 14px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.diary-card .btn.small { justify-self: end; }
 
 /* ---------- 「更多」選單 ---------- */
 .sheet { width: min(560px, 100vw); max-width: 100vw; margin: auto auto 0; padding: 8px 16px calc(env(safe-area-inset-bottom) + 20px); border: 0; border-radius: 24px 24px 0 0; background: var(--card); color: var(--ink); }

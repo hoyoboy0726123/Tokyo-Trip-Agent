@@ -209,7 +209,7 @@ function handle(m) {
       break;
     case "settings":
       S.settings = m.settings;
-      if (S.panel === "settings") renderPanel();
+      if (S.panel === "settings" || S.panel === "diary") renderPanel();
       break;
     case "state":
       setState(m.state);
@@ -1593,24 +1593,67 @@ function renderRemindersPanel(st, b) {
 
 // ---------- 📔 旅遊日記 ----------
 
+// 每天一張卡片（封面照＋標題＋摘要），點進去是圖文版日記網頁，那裡可以下載 PDF、分享
 function renderDiaryPanel(st, b) {
   els.panelTitle.textContent = "📔 旅遊日記";
   const ds = st.diaries ?? [];
+  const share = S.settings?.share ? location.origin + S.settings.share : "";
+  const start = st.trip?.startDate;
+  const dayNo = (date) => (start ? Math.floor((Date.parse(date + "T00:00:00Z") - Date.parse(start + "T00:00:00Z")) / 86400e3) + 1 : "");
   b.innerHTML = `
     ${backToHub()}
-    <p class="small muted">旅途中每晚 22:00（東京時間）AI 會用當天的對話和照片寫一篇日記。</p>
-    <a class="btn primary-sm" href="/api/album" target="_blank" rel="noopener" style="display:block;text-align:center;text-decoration:none">📖 打開相簿（可列印／存成 PDF）</a>
+    <div class="card diary-top">
+      <p class="small muted">旅途中每晚 22:00（東京時間）AI 會用當天的對話和照片寫一篇日記，整理成圖文版的日記網頁。</p>
+      <a class="diary-main" href="/api/album" target="_blank" rel="noopener">${svg("book")}打開日記網頁</a>
+      <div class="diary-row">
+        <a class="btn" href="/api/album?print=1" target="_blank" rel="noopener">下載 PDF</a>
+        <button type="button" class="btn" id="diary-share">分享給親友</button>
+      </div>
+      <div class="small muted">${share ? "分享連結已開啟：拿到連結的人不用登入就能看日記和照片。" : S.me.admin ? "分享連結還沒開啟，按「分享給親友」會先問你要不要開啟。" : "分享連結要由管理員開啟。"}</div>
+      ${S.me.admin && share ? `<button type="button" class="btn small" id="diary-share-off">關閉分享連結（舊連結會失效）</button>` : ""}
+    </div>
     ${ds.length
       ? ds.map((d) => {
           const photos = JSON.parse(d.photo_ids || "[]");
-          return `<div class="card"><h3>${escapeHtml(String(d.date).slice(5).replace("-", "/"))}</h3>
-            <div class="small" style="white-space:pre-wrap">${escapeHtml(d.text)}</div>
-            ${photos.length ? `<div class="gallery">${photos.map((p) => `<figure><img class="photo web" src="/api/photo/${escapeHtml(p)}" loading="lazy" /></figure>`).join("")}</div>` : ""}
+          const excerpt = String(d.text || "").replace(/\s+/g, " ").slice(0, 100);
+          return `<div class="diary-card">
+            <a href="/api/album#${escapeHtml(d.date)}" target="_blank" rel="noopener">
+              ${photos[0] ? `<img src="/api/photo/${escapeHtml(photos[0])}" loading="lazy" alt="" />` : ""}
+              <div class="diary-card-body">
+                <div class="diary-kicker">DAY ${dayNo(d.date)}・${dateLabel(d.date)}・${photos.length} 張照片</div>
+                <h3>${escapeHtml(d.title || "旅途中的一天")}</h3>
+                <p>${escapeHtml(excerpt)}…</p>
+              </div>
+            </a>
+            ${S.me.admin ? `<button type="button" class="btn small" data-rewrite="${escapeHtml(d.date)}">重寫這篇</button>` : ""}
           </div>`;
         }).join("")
       : `<div class="card small muted">還沒有日記</div>`}`;
   bindBack(b);
-  b.querySelectorAll(".gallery img").forEach((img) => img.addEventListener("click", () => openViewer(img.src)));
+  $("#diary-share", b).addEventListener("click", () => {
+    if (share) return shareLink(share, `${st.trip?.title || "旅遊"}｜旅遊日記`);
+    if (!S.me.admin) return alert("分享連結要由管理員開啟");
+    if (confirm("開啟分享連結後，拿到連結的人不用登入就能看日記和照片（之後隨時可以關閉）。要開啟嗎？")) action({ action: "share_on" });
+  });
+  $("#diary-share-off", b)?.addEventListener("click", () => {
+    if (confirm("關閉後，之前分享出去的連結都會失效。確定關閉？")) action({ action: "share_off" });
+  });
+  b.querySelectorAll("[data-rewrite]").forEach((x) =>
+    x.addEventListener("click", () => {
+      if (!confirm(`用 ${x.dataset.rewrite.slice(5).replace("-", "/")} 的對話和照片重新寫這篇日記？（不會在群組重貼）`)) return;
+      x.disabled = true;
+      x.textContent = "重寫中，約需 30 秒…";
+      action({ action: "diary_rewrite", date: x.dataset.rewrite });
+    }),
+  );
+}
+
+/** 手機用分享面板（LINE、訊息…），電腦或不支援時複製連結 */
+function shareLink(url, title) {
+  const copy = () =>
+    navigator.clipboard ? navigator.clipboard.writeText(url).then(() => alert("已複製分享連結"), () => prompt("複製這個連結分享：", url)) : prompt("複製這個連結分享：", url);
+  if (navigator.share) navigator.share({ title, url }).catch((e) => e.name !== "AbortError" && copy());
+  else copy();
 }
 
 // ================= 中日翻譯 =================
