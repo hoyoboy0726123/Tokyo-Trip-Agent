@@ -9,7 +9,14 @@ export interface DiaryDay {
   title: string;
   plan: string; // 當天行程
   text: string;
-  photos: string[]; // 照片網址
+  photos: DiaryPhoto[];
+}
+
+export interface DiaryPhoto {
+  src: string; // 照片網址
+  /** 放在第幾段後面（AI 依內容挑的位置）；沒有就照舊版排法穿插 */
+  para?: number;
+  caption?: string;
 }
 
 export interface DiaryPageInput {
@@ -48,26 +55,39 @@ function img(src: string, cls = "", alt = ""): string {
   return `<img src="${esc(src)}"${cls ? ` class="${cls}"` : ""} alt="${esc(alt)}" loading="lazy" decoding="async">`;
 }
 
-/** 照片格：手機兩欄、奇數張時第一張橫跨整列；寬螢幕與列印時欄數跟著張數（最多 3 欄），才不會空一格 */
-function grid(photos: string[], alt: string): string {
-  if (!photos.length) return "";
-  return `<div class="grid" style="--cols:${Math.min(photos.length, 3)}">${photos.map((p, i) => img(p, photos.length % 2 && i === 0 ? "wide" : "", alt)).join("")}</div>`;
+function figure(ph: DiaryPhoto, cls: string, alt: string): string {
+  return `<figure${cls ? ` class="${cls}"` : ""}>${img(ph.src, "", ph.caption || alt)}${ph.caption ? `<figcaption>${esc(ph.caption)}</figcaption>` : ""}</figure>`;
 }
 
-/** 文字和照片交錯：第一段後放大圖，第二段後放兩張，其餘照片放在文末 */
+/** 一張就放大圖；多張排成照片格：手機兩欄、奇數張時第一張橫跨整列；寬螢幕與列印時欄數跟著張數（最多 3 欄），才不會空一格 */
+function photoBlock(photos: DiaryPhoto[], alt: string): string {
+  if (!photos.length) return "";
+  if (photos.length === 1) return figure(photos[0], "hero", alt);
+  return `<div class="grid" style="--cols:${Math.min(photos.length, 3)}">${photos.map((p, i) => figure(p, photos.length % 2 && i === 0 ? "wide" : "", alt)).join("")}</div>`;
+}
+
+/** 文字和照片交錯：照片放在描述它的那段後面；舊日記（沒有位置）第一段後放大圖、第二段後放兩張，其餘放文末 */
 function dayBody(d: DiaryDay): string {
   const ps = paragraphs(d.text);
+  if (d.photos.some((p) => p.para != null)) {
+    const last = Math.max(ps.length - 1, 0);
+    const at = (i: number) => d.photos.filter((p) => p.para != null && Math.min(p.para, last) === i);
+    const out = ps.map((p, i) => `<p>${esc(p)}</p>${photoBlock(at(i), d.title)}`);
+    if (!ps.length) out.push(photoBlock(at(0), d.title));
+    out.push(photoBlock(d.photos.filter((p) => p.para == null), d.title));
+    return out.join("");
+  }
   const [hero, ...rest] = d.photos;
   const mid = ps.length >= 3 ? rest.slice(0, 2) : [];
   const tail = rest.slice(mid.length);
   const out: string[] = [];
   ps.forEach((p, i) => {
     out.push(`<p>${esc(p)}</p>`);
-    if (i === 0 && hero) out.push(`<figure class="hero">${img(hero, "", d.title)}</figure>`);
-    if (i === 1 && mid.length) out.push(grid(mid, d.title));
+    if (i === 0 && hero) out.push(figure(hero, "hero", d.title));
+    if (i === 1 && mid.length) out.push(photoBlock(mid, d.title));
   });
-  if (!ps.length && hero) out.push(`<figure class="hero">${img(hero, "", d.title)}</figure>`);
-  out.push(grid(tail, d.title));
+  if (!ps.length && hero) out.push(figure(hero, "hero", d.title));
+  out.push(photoBlock(tail, d.title));
   return out.join("");
 }
 
@@ -75,7 +95,7 @@ export function renderDiaryPage(p: DiaryPageInput): string {
   const days = p.days;
   const photoCount = days.reduce((n, d) => n + d.photos.length, 0);
   // 封面用最近一天的照片（第一天的第一張在下面第一章就會出現，避免重複）
-  const cover = [...days].reverse().find((d) => d.photos.length)?.photos[0] ?? "";
+  const cover = [...days].reverse().find((d) => d.photos.length)?.photos[0]?.src ?? "";
   const firstText = paragraphs(days[0]?.text ?? "")[0] ?? "";
   const ogImage = p.mode === "share" && cover ? p.origin + cover : "";
   const pageTitle = `${p.tripTitle}｜旅遊日記`;
@@ -139,11 +159,15 @@ img{display:block;max-width:100%}
 .text p{margin:0 0 1em}
 .text>p:first-child::first-letter{font-family:var(--title);font-size:2.7em;float:left;line-height:1;margin:.1em .12em 0 0;color:var(--accent)}
 figure{margin:18px -6px}
-figure img,.grid img{width:100%;background:var(--line);cursor:zoom-in}
-.hero img{aspect-ratio:4/3;object-fit:cover;border-radius:16px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:18px -6px}
+figure img{width:100%;background:var(--line);cursor:zoom-in}
+.hero img{height:auto;max-height:75vh;max-height:75svh;object-fit:cover;border-radius:16px}
+figcaption{font-size:13.5px;line-height:1.5;color:var(--muted);text-align:center;padding:8px 8px 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px 8px;margin:18px -6px}
+.grid figure{margin:0}
 .grid img{aspect-ratio:1;object-fit:cover;border-radius:12px}
-.grid img.wide{grid-column:1/-1;aspect-ratio:16/9}
+.grid .wide{grid-column:1/-1}
+.grid .wide img{aspect-ratio:16/9}
+.grid figcaption{font-size:12.5px;padding:6px 2px 0}
 .empty{text-align:center;color:var(--muted);padding:48px 0}
 footer{text-align:center;color:var(--muted);font-size:13px;padding:28px 0 8px}
 .bar{position:fixed;left:0;right:0;bottom:0;z-index:5;display:flex;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom,0px));background:rgba(255,253,248,.94);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);border-top:1px solid var(--line)}
@@ -154,7 +178,7 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:28px 0 8px}
 .lb img{max-width:100%;max-height:100%;border-radius:8px}
 .toast{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:8;background:rgba(28,31,38,.92);color:#fff;padding:10px 16px;border-radius:12px;font-size:14px;max-width:88vw;text-align:center;display:none}
 .toast.on{display:block}
-@media (min-width:700px){.grid{grid-template-columns:repeat(var(--cols,3),1fr)}.grid img.wide{grid-column:auto;aspect-ratio:4/3}.grid img{aspect-ratio:4/3}.day{padding:34px 40px 36px}figure,.grid{margin-left:0;margin-right:0}}
+@media (min-width:700px){.grid{grid-template-columns:repeat(var(--cols,3),1fr)}.grid .wide{grid-column:auto}.grid img,.grid .wide img{aspect-ratio:4/3}.day{padding:34px 40px 36px}figure,.grid{margin-left:0;margin-right:0}}
 @page{size:A4;margin:14mm 14mm 16mm}
 @media print{
   *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
@@ -165,9 +189,12 @@ footer{text-align:center;color:var(--muted);font-size:13px;padding:28px 0 8px}
   .day{break-before:page;border:0;border-radius:0;margin:0;padding:0}
   figure,.grid,.grid img{break-inside:avoid}
   figure,.grid{margin:12px 0}
-  .hero img{max-height:105mm}
+  .grid figure{margin:0}
+  .hero img{width:auto;max-width:100%;max-height:110mm;margin:0 auto}
+  figcaption{font-size:9.5pt}
   .grid{grid-template-columns:repeat(var(--cols,3),1fr)}
-  .grid img,.grid img.wide{grid-column:auto;aspect-ratio:4/3;max-height:80mm}
+  .grid .wide{grid-column:auto}
+  .grid img,.grid .wide img{aspect-ratio:4/3;max-height:80mm}
   footer{display:none}
 }
 </style>

@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { safeEqual } from "./auth";
-import { parseArgs, providerFor, type GeminiGate } from "./providers";
+import { geminiProvider, parseArgs, providerFor, type GeminiGate } from "./providers";
 import { GeminiLimiter, RateLimitedError } from "./ratelimit";
 import { DRAFT_TOOLS, japanAlerts, reverseArea, runTool, SCALE_TEXT, toolLabel, TOOL_DECLS, type AttachedImage, type DraftInput, type ExpenseInput, type RoomApi } from "./tools";
 import { fixMapLinks, type MapFixOptions } from "./maplinks";
@@ -12,6 +12,46 @@ import type { Env, Part, Provider, SessionUser, Turn } from "./types";
 const HISTORY_WINDOW = 24; // 每次帶給模型的最近訊息數（更早的靠自動回想找回，省 TPM）
 const HISTORY_CHARS = 600; // 每則歷史訊息最多帶多少字
 const PIN_LIMIT = 20; // 置頂訊息上限（每次狀態更新都會帶完整內容，不宜太多）
+
+/** AI 看過照片後的說明（存起來，重寫日記不用再看一次） */
+interface PhotoNote { kind: string; score: number; note: string }
+/** 日記裡的照片：放在第幾段後面、照片說明 */
+interface DiaryPhoto { id: string; para: number; caption: string }
+const PHOTO_KINDS = ["景點", "風景", "美食", "人物", "購物", "交通", "住宿", "收據", "截圖", "文件", "旅途外", "其他"];
+/** 不放進日記的照片（日記會分享給親友；收據截圖沒有閱讀價值；家裡的寵物、舊照片不是這趟旅行） */
+const NOT_DIARY_PHOTO = new Set(["收據", "截圖", "文件", "旅途外"]);
+const hhmm = (ts: number) => new Date(ts + 9 * 3600_000).toISOString().slice(11, 16);
+
+function parseJsonArray(text: string): any[] | null {
+  const a = text.indexOf("["), b = text.lastIndexOf("]");
+  if (a < 0 || b <= a) return null;
+  try {
+    const v = JSON.parse(text.slice(a, b + 1));
+    return Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 日記原文：第一行標題，之後每行一段；照片標記 [P3｜說明] 跟在它描述的那段後面 */
+function parseDiary(raw: string): { title: string; paragraphs: string[]; marks: { tag: string; para: number; caption: string }[] } {
+  const MARK = /\[\s*(P\d+)\s*(?:[｜|:：]\s*([^\]\n]*))?\]/gi;
+  const paragraphs: string[] = [];
+  const marks: { tag: string; para: number; caption: string }[] = [];
+  let title = "";
+  for (const line of raw.replace(/```\w*/g, "").split("\n")) {
+    const found = [...line.matchAll(MARK)];
+    const rest = line.replace(MARK, "").replace(/^#+\s*|\*\*/g, "").trim();
+    const named = rest.match(/^標題[:：]\s*(.+)$/);
+    if (named || (!title && !paragraphs.length && rest && !found.length && rest.length <= 24)) {
+      title = (named ? named[1] : rest).replace(/[「」『』"“”]/g, "").trim();
+      continue;
+    }
+    if (rest) paragraphs.push(rest);
+    for (const f of found) marks.push({ tag: f[1].toUpperCase(), para: Math.max(0, paragraphs.length - 1), caption: (f[2] ?? "").trim().slice(0, 40) });
+  }
+  return { title, paragraphs, marks };
+}
 const MAX_STEPS = 8; // 單次回答最多工具回合（含系統提醒／代為執行）
 const FOREGROUND_MAX_WAIT = 10_000; // 回答問題時，Gemini 額度滿最多等幾毫秒，超過就改用備援
 const MEMORY_EVERY = 4; // 每 4 則新的成員訊息自動整理一次長期記憶
@@ -180,8 +220,10 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     if (!this.sql.exec("PRAGMA table_info(diaries)").toArray().some((c) => c.name === "title")) this.sql.exec("ALTER TABLE diaries ADD COLUMN title TEXT");
     // v7：置頂訊息（全家共用，等一下還要再看的資訊不會被洗掉）
     this.sql.exec("CREATE TABLE IF NOT EXISTS pins (message_id TEXT PRIMARY KEY, ts INTEGER, by TEXT)");
+    // 日記挑照片用：AI 看過每張照片的說明
+    this.sql.exec("CREATE TABLE IF NOT EXISTS photo_notes (photo_id TEXT PRIMARY KEY, kind TEXT, score INTEGER, note TEXT, ts INTEGER)");
     // 家人修改日記：記下最後是誰改的
-    for (const col of ["edited_by TEXT", "edited_at INTEGER"]) {
+    for (const col of ["edited_by TEXT", "edited_at INTEGER", "layout TEXT"]) {
       if (!this.sql.exec("PRAGMA table_info(diaries)").toArray().some((c) => c.name === col.split(" ")[0])) this.sql.exec(`ALTER TABLE diaries ADD COLUMN ${col}`);
     }
     if (!this.setting("checklist_seeded")) {
@@ -518,7 +560,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       // 家人修改日記：標題、內文、照片（只能用已上傳的照片）；有人同時在改就擋下，免得互相蓋掉
       case "diary_edit": {
         const date = String(msg.date ?? "");
-        const row = this.sql.exec("SELECT ts FROM diaries WHERE date = ?", date).toArray()[0];
+        const row = this.sql.exec("SELECT ts, layout FROM diaries WHERE date = ?", date).toArray()[0];
         if (!row) return reply(false, "找不到這天的日記");
         if (Number(msg.base) !== Number(row.ts)) return reply(false, "剛剛有人修改過這篇日記，請回上一頁重新打開再改");
         const title = String(msg.title ?? "").trim().slice(0, 40);
@@ -527,12 +569,20 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
         const known = new Set(
           ids.length ? this.sql.exec(`SELECT id FROM photos WHERE id IN (${ids.map(() => "?").join(",")})`, ...ids).toArray().map((r) => r.id as string) : [],
         );
-        const photos = [...new Set(ids.filter((id: string) => known.has(id)))];
+        const photos: string[] = [...new Set<string>(ids.filter((id: string) => known.has(id)))];
         if (!title && !text && !photos.length) return reply(false, "日記不能全部清空");
+        // 照片穿插在文章裡的位置（第幾段後面）不變，依新順序換成放哪一張；新加的照片放文末，說明跟著照片走
+        const prev: DiaryPhoto[] = JSON.parse((row.layout as string) || "[]");
+        let layout: DiaryPhoto[] | null = null;
+        if (prev.length) {
+          const byId = new Map(prev.map((l) => [l.id, l]));
+          const slots = photos.map((id) => byId.get(id)?.para ?? 999).sort((a, b) => a - b);
+          layout = photos.map((id, i) => ({ id, para: slots[i], caption: byId.get(id)?.caption ?? "" }));
+        }
         const now = Date.now();
         this.sql.exec(
-          "UPDATE diaries SET title = ?, text = ?, photo_ids = ?, ts = ?, edited_by = ?, edited_at = ? WHERE date = ?",
-          title, text, JSON.stringify(photos), now, user.name, now, date,
+          "UPDATE diaries SET title = ?, text = ?, photo_ids = ?, layout = ?, ts = ?, edited_by = ?, edited_at = ? WHERE date = ?",
+          title, text, JSON.stringify(photos), layout ? JSON.stringify(layout) : null, now, user.name, now, date,
         );
         this.broadcastState();
         break;
@@ -620,6 +670,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
           this.sql.exec("DELETE FROM drafts");
           this.sql.exec("DELETE FROM pins");
           this.sql.exec("DELETE FROM photos");
+          this.sql.exec("DELETE FROM photo_notes");
           this.sql.exec("DELETE FROM locations");
           this.sql.exec("DELETE FROM translations");
           this.setSetting("memory_cursor", "0");
@@ -1097,18 +1148,32 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
   }
 
   /** 不用工具、只產生文字（早報、日記）：Gemini 有額度就用，不然用 Gemma */
-  private async generatePlain(system: string, prompt: string): Promise<string> {
+  private async generatePlain(system: string, prompt: string, maxTokens?: number): Promise<string> {
     const order = this.settings().provider === "workers-ai" || !this.settings().hasGemini ? ["workers-ai", "gemini", "gemini-backup"] : ["gemini", "workers-ai", "gemini-backup"];
     for (const pid of order) {
       if (pid !== "workers-ai" && !this.settings().hasGemini) continue;
       try {
-        const r = await providerFor(this.env, pid, this.geminiGate(1, 5_000, undefined, pid === "gemini-backup")).generate({ system, turns: [{ role: "user", parts: [{ text: prompt }] }] });
+        const r = await providerFor(this.env, pid, this.geminiGate(1, 5_000, undefined, pid === "gemini-backup")).generate({ system, turns: [{ role: "user", parts: [{ text: prompt }] }], maxTokens });
         if (r.text.trim()) return r.text.trim();
       } catch (e) {
         if (!(e instanceof RateLimitedError)) console.error(`generatePlain via ${pid} failed`, e);
       }
     }
     throw new Error("AI 暫時無法產生內容");
+  }
+
+  /** 日記：長文又要照格式，先用比較會寫的模型（一天一篇，額度跟聊天分開），不行再用一般的 */
+  private async generateLong(system: string, prompt: string): Promise<string> {
+    const writer = this.env.GEMINI_WRITER_MODEL;
+    if (writer && this.settings().hasGemini) {
+      try {
+        const r = await geminiProvider(this.env, writer).generate({ system, turns: [{ role: "user", parts: [{ text: prompt }] }], timeoutMs: 150_000 });
+        if (r.text.trim()) return r.text.trim();
+      } catch (e) {
+        console.error(`diary via ${writer} failed`, e);
+      }
+    }
+    return this.generatePlain(system, prompt, 4096);
   }
 
   async postMorningBrief(date: string) {
@@ -1136,46 +1201,172 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     this.postAiMessage(`☀️ **早安！${date.slice(5).replace("-", "/")} 早報**\n\n${text}`, { kind: "brief" });
   }
 
+  /**
+   * 日記挑照片前先看過每張照片：拍了什麼、適不適合放進日記（收據、截圖、證件不放）。
+   * 看過的存進 photo_notes，重寫日記不用再看；一次送 5 張，照片多也不會太慢
+   */
+  private async describePhotos(rows: MessageRow[]): Promise<Map<string, PhotoNote>> {
+    const notes = new Map<string, PhotoNote>();
+    const ids = rows.map((m) => m.photo_id as string);
+    if (!ids.length) return notes;
+    for (const r of this.sql.exec(`SELECT * FROM photo_notes WHERE photo_id IN (${ids.map(() => "?").join(",")})`, ...ids).toArray()) {
+      notes.set(r.photo_id as string, { kind: String(r.kind), score: Number(r.score), note: String(r.note) });
+    }
+    const todo = rows.filter((m) => !notes.has(m.photo_id as string));
+    const order = this.settings().hasGemini ? ["gemini", "gemini-backup", "workers-ai"] : ["workers-ai"];
+    for (let i = 0; i < todo.length; i += 5) {
+      const batch = todo.slice(i, i + 5).flatMap((m) => {
+        const p = this.sql.exec("SELECT mime, data FROM photos WHERE id = ?", m.photo_id).toArray()[0];
+        return p ? [{ m, image: { mime: p.mime as string, data: toBase64(p.data as ArrayBuffer) } }] : [];
+      });
+      if (!batch.length) continue;
+      const parts: Part[] = [
+        {
+          text: `以下是家庭旅遊群組今天的 ${batch.length} 張照片，依序編號。請逐張判斷，只輸出 JSON 陣列：[{"n":1,"kind":"…","score":3,"note":"…"}]
+kind 只能是：${PHOTO_KINDS.join("、")}（收據＝收據、發票、帳單；截圖＝手機或網頁畫面截圖；文件＝票券、證件、表單等文字資料；旅途外＝不是這趟旅行拍的，例如家裡的寵物、家裡、舊照片）
+note：繁體中文 20–60 字，具體寫出看到什麼：地點或招牌、食物或商品名稱、人（大人或小孩）在做什麼、表情動作；看不出來的照實寫，不要猜人名
+score：當旅遊日記插圖的價值，大部分照片是 2–4 分：
+5＝一看就有故事（家人生動的表情或互動、壯觀的景色、招牌美食上桌）
+4＝好看的旅途紀錄（景點、街景、店面、美食、家人合照）
+3＝普通的紀錄
+2＝資訊類照片（菜單、時刻表、告示牌、販賣機、垃圾桶、商品包裝特寫）
+1＝沒意義（模糊、隨手亂拍、看不出內容）`,
+        },
+      ];
+      batch.forEach(({ m, image }, k) => {
+        parts.push({ text: `照片 ${k + 1}（${hhmm(m.ts)} ${m.author} 傳${m.text ? `，附言：「${m.text.slice(0, 80)}」` : ""}）` });
+        parts.push({ image });
+      });
+      let parsed: any[] | null = null;
+      for (const pid of order) {
+        try {
+          const r = await providerFor(this.env, pid, this.geminiGate(1, 20_000, undefined, pid === "gemini-backup")).generate({
+            system: "你是幫家庭旅遊日記挑照片的編輯，只輸出 JSON。",
+            turns: [{ role: "user", parts }],
+            json: true,
+          });
+          parsed = parseJsonArray(r.text);
+          if (parsed) break;
+        } catch (e) {
+          if (!(e instanceof RateLimitedError)) console.error(`describePhotos via ${pid} failed`, e);
+        }
+      }
+      for (const x of parsed ?? []) {
+        const hit = batch[Number(x?.n) - 1];
+        if (!hit) continue;
+        const note: PhotoNote = {
+          kind: PHOTO_KINDS.includes(x.kind) ? x.kind : "其他",
+          score: Math.min(5, Math.max(1, Math.round(Number(x.score) || 3))),
+          note: String(x.note ?? "").slice(0, 120),
+        };
+        notes.set(hit.m.photo_id as string, note);
+        this.sql.exec("INSERT OR REPLACE INTO photo_notes VALUES (?, ?, ?, ?, ?)", hit.m.photo_id, note.kind, note.score, note.note, Date.now());
+      }
+    }
+    return notes;
+  }
+
   /** announce＝在群組貼出來（每晚自動寫）；管理員重寫舊日記時不貼 */
   async writeDiary(date: string, announce = true) {
     if (announce) this.setSetting("diary_sent", date);
     const start = Date.parse(date + "T00:00:00Z") - 9 * 3600_000;
     const msgs = this.sql.exec<MessageRow>("SELECT * FROM messages WHERE ts >= ? AND ts < ? ORDER BY ts", start, start + 86400_000).toArray();
-    const photos = msgs.filter((m) => m.photo_id && m.role === "user").map((m) => m.photo_id as string).slice(0, 12);
+    // 證件、票券照片絕對不能進日記（日記可以分享給親友）
+    const docs = new Set(this.sql.exec("SELECT photo_id FROM documents WHERE photo_id IS NOT NULL").toArray().map((r) => r.photo_id as string));
+    const photoMsgs = msgs.filter((m) => m.photo_id && m.role === "user" && !docs.has(m.photo_id)).slice(-40);
+    const notes = await this.describePhotos(photoMsgs);
+    const score = (m: MessageRow) => notes.get(m.photo_id as string)?.score ?? 3;
+    // 可以放進日記的照片依時間編號 P1、P2…；太多就留精彩度高的
+    let pool = photoMsgs.filter((m) => {
+      const n = notes.get(m.photo_id as string);
+      return !n || (!NOT_DIARY_PHOTO.has(n.kind) && n.score >= 3);
+    });
+    if (pool.length > 30) {
+      const keep = new Set([...pool].sort((a, b) => score(b) - score(a)).slice(0, 30));
+      pool = pool.filter((m) => keep.has(m));
+    }
+    const tag = new Map(pool.map((m, i) => [m.photo_id as string, `P${i + 1}`]));
+    const catalog = pool
+      .map((m) => {
+        const n = notes.get(m.photo_id as string);
+        return `[${tag.get(m.photo_id as string)}] ${hhmm(m.ts)} ${m.author} 傳｜${n ? `${n.kind}｜精彩度 ${n.score}｜${n.note}` : "（沒有說明）"}${m.text ? `｜附言：「${m.text.slice(0, 60)}」` : ""}`;
+      })
+      .join("\n");
     // 出發前預付的機票、住宿、門票（台幣大額）也記在出發日，不能當成當天花費；只拿當天買的東西當寫作素材
     const bought = this.sql
-      .exec("SELECT description FROM expenses WHERE date = ? AND currency = 'JPY' AND amount < 30000 ORDER BY id", date)
+      .exec("SELECT ts, description, category FROM expenses WHERE date = ? AND currency = 'JPY' AND amount < 30000 ORDER BY ts", date)
       .toArray()
-      .map((r) => String(r.description))
-      .slice(0, 15);
+      .slice(0, 30)
+      .map((r) => `${hhmm(Number(r.ts))} ${r.description}${r.category ? `（${r.category}）` : ""}`);
     const today = this.itinerary().find((d) => d.date === date);
-    const transcript = msgs
-      .filter((m) => m.role !== "system" && (m.meta ? !JSON.parse(m.meta).kind : true))
-      .map((m) => `${m.role === "assistant" ? AI_NAME : m.author}：${m.text.slice(0, 200)}${m.photo_id ? "（照片）" : ""}`)
-      .join("\n")
-      .slice(-6000);
-    const prompt = `請用今天的群組對話，幫這個台灣家庭寫一篇旅遊日記，繁體中文，溫馨有趣、像家人一起回憶。
-格式：第一行只寫標題（14 字以內、生動有畫面，不要加符號、引號或「標題：」），空一行，接著是內文 3–5 段、共 350–500 字，段落之間空一行。
-寫出今天去了哪裡、吃了什麼、買了什麼、小朋友的有趣時刻、印象深刻的事；不要編造對話裡沒有的事，資料少就寫短一點；不要寫花了多少錢。
-日期：${date}；行程：${today ? today.title : "自由活動"}；照片 ${photos.length} 張
-今天買的東西：${bought.join("、") || "（沒有記帳）"}
-對話：
+    // 整天的對話都要看到（不是只看最後一段）；太長先拿掉 AI 的回答，再不夠才截頭尾
+    const lines = (withAi: boolean) =>
+      msgs
+        .filter((m) => m.role === "user" || (withAi && m.role === "assistant" && !(m.meta && JSON.parse(m.meta).kind)))
+        .map((m) => {
+          if (m.role === "assistant") {
+            const t = m.text.replace(/\s+/g, " ");
+            return `${hhmm(m.ts)} ${AI_NAME}：${t.slice(0, 120)}${t.length > 120 ? "…" : ""}`;
+          }
+          const pic = m.photo_id ? (tag.has(m.photo_id) ? `（傳了照片 ${tag.get(m.photo_id)}）` : "（傳了照片）") : "";
+          return `${hhmm(m.ts)} ${m.author}：${m.text.slice(0, 300)}${pic}`;
+        })
+        .join("\n");
+    let transcript = lines(true);
+    if (transcript.length > 14000) transcript = lines(false);
+    if (transcript.length > 14000) transcript = `${transcript.slice(0, 7000)}\n…（中間省略）…\n${transcript.slice(-7000)}`;
+    const plan = today ? `${today.title}${today.detail ? `（${String(today.detail).slice(0, 300)}）` : ""}` : "自由活動";
+    const prompt = `請根據下面的資料，幫這個${TRIP.travelers}寫 ${date} 的旅遊日記，繁體中文，像家人一起回憶這一天，溫馨、生動、有畫面。
+
+【寫法】
+- 第一行寫「標題：」加上標題（8–16 字，生動有畫面，不加引號），空一行後寫內文。
+- 先從對話、記帳和照片整理出今天的時間軸（幾點在哪裡、做了什麼），再依時間順序寫成完整的一天：出門、交通、去了哪些地方、吃了什麼、買了什麼、路上發生的事、晚上回到住處。每段寫一個時段或場景，段落之間空一行。
+- 挑出當天最精彩有趣的片段多寫一點：小朋友的趣事、家人說的有趣的話（可以直接引用原話）、意外的小插曲、驚喜或感動的時刻。寫出具體的店名、景點、食物和商品名稱，不要寫「吃了美食」「逛了街」這種空泛的句子；每個場景寫出當時的氣氛、心情和小朋友的反應。
+- 寫成當下發生的事，不要寫「傳了照片」「在群組問」「拍下了」這類描述，也不要描述照片的構圖或表情細節（例如「直視鏡頭」）。照片只是插圖，不要為了用照片硬寫內容。
+- 最後一段做個溫暖的小結，可以帶到對明天的期待。
+- 長短跟著資料走：對話和照片多的日子寫 6–9 段、每段 150–220 字、全文 900–1500 字；資料少就寫短一點，不要用想像的畫面或情節湊字數。絕對不要編造資料裡沒有的地點、事件或對話。
+- 旅伴（AI）的回答只是建議或解答，不代表家人真的去了，要以家人說的話、照片和記帳為準。不要寫花了多少錢，不要提到 AI、手機或群組。
+- 家人的稱呼照對話裡的用法，不要自己取名字。照片清單不會寫照片裡是誰：傳照片的人通常是拍照的人，不一定在照片裡。內文和照片說明提到照片裡的人，只有附言或對話說清楚是誰才寫名字，不然寫「孩子們」「小傢伙」「大家」，不要猜。
+
+【照片】
+- 從照片清單挑 5–10 張最精彩、而且跟內文對得上的照片（照片少就挑好的就好），優先用精彩度 4–5 分的。放在寫到那個場景的段落後面，另起一行寫成 [P編號｜照片說明]，例如：
+[P3｜終於買到心心念念的鋼彈！]
+- 照片說明 6–18 字，像相簿裡溫馨或俏皮的小標，不要照抄照片清單的描述，但內容要跟照片相符。
+- 每段最多放 2 張；每張照片最多用一次；很像的照片只挑最好的一張；跟段落內容對不上的不要放。
+
+日期：${date}
+原本的行程：${plan}（只是計畫，實際去了哪裡以對話和照片為準）
+今天記帳的品項（記帳時間）：${bought.join("、") || "（沒有記帳）"}
+照片清單：
+${catalog || "（今天沒有照片）"}
+群組對話：
 ${transcript || "（今天群組沒什麼對話）"}`;
-    const raw = (await this.generatePlain("你是幫家庭寫旅遊日記的溫暖作家，只根據提供的資料寫。", prompt)).trim();
-    const [first = "", ...rest] = raw.split("\n");
-    let title = first.replace(/^#+\s*|^標題[:：]\s*|\*\*|[「」『』"“”]/g, "").trim();
-    let text = rest.join("\n").trim();
-    // 模型沒照格式（第一行就是內文）：整段當內文，標題用當天行程
-    if (!text || title.length > 24) {
-      text = raw;
-      title = today ? String(today.title) : "旅途中的一天";
-    }
+    const raw = await this.generateLong("你是幫家庭寫旅遊日記的溫暖作家，文筆生動細膩，只根據提供的資料寫。", prompt);
+    const { paragraphs, marks, ...parsed } = parseDiary(raw);
+    // 模型沒寫標題（第一行就是內文）：標題用當天行程
+    const title = parsed.title && parsed.title.length <= 30 ? parsed.title : today ? String(today.title) : "旅途中的一天";
+    const text = paragraphs.join("\n\n");
+    const byTag = new Map(pool.map((m) => [tag.get(m.photo_id as string)!, m.photo_id as string]));
+    const used = new Set<string>();
+    const layout: DiaryPhoto[] = marks
+      .flatMap((k) => {
+        const id = byTag.get(k.tag);
+        if (!id || used.has(id)) return [];
+        used.add(id);
+        return [{ id, para: k.para, caption: k.caption }];
+      })
+      .slice(0, 14);
+    // 模型沒放照片標記：挑精彩度高的照片，照舊版排法穿插
+    const photos = layout.length
+      ? layout.map((l) => l.id)
+      : [...pool].sort((a, b) => score(b) - score(a)).slice(0, 8).sort((a, b) => a.ts - b.ts).map((m) => m.photo_id as string);
     this.sql.exec(
-      "INSERT INTO diaries (date, ts, title, text, photo_ids) VALUES (?, ?, ?, ?, ?) ON CONFLICT(date) DO UPDATE SET ts = excluded.ts, title = excluded.title, text = excluded.text, photo_ids = excluded.photo_ids, edited_by = NULL, edited_at = NULL",
-      date, Date.now(), title, text, JSON.stringify(photos),
+      "INSERT INTO diaries (date, ts, title, text, photo_ids, layout) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(date) DO UPDATE SET ts = excluded.ts, title = excluded.title, text = excluded.text, photo_ids = excluded.photo_ids, layout = excluded.layout, edited_by = NULL, edited_at = NULL",
+      date, Date.now(), title, text, JSON.stringify(photos), layout.length ? JSON.stringify(layout) : null,
     );
     if (announce) {
-      const images: AttachedImage[] = photos.slice(0, 8).map((id) => ({ src: `/api/photo/${id}`, caption: "", source: "今天的照片" }));
+      const caption = new Map(layout.map((l) => [l.id, l.caption]));
+      const images: AttachedImage[] = photos.slice(0, 8).map((id) => ({ src: `/api/photo/${id}`, caption: caption.get(id) ?? "", source: "今天的照片" }));
       this.postAiMessage(
         `📔 **${date.slice(5).replace("-", "/")} 旅遊日記｜${title}**\n\n${text}\n\n（下方「工具箱」→ 旅遊日記：看圖文版、下載 PDF 或分享給親友）`,
         { kind: "diary", images },
@@ -1237,13 +1428,17 @@ ${transcript || "（今天群組沒什麼對話）"}`;
       .toArray()
       .map((d) => {
         const date = String(d.date);
+        const layout = new Map((JSON.parse((d.layout as string) || "[]") as DiaryPhoto[]).map((l) => [l.id, l]));
         return {
           date,
           dayNo: Math.floor((Date.parse(date + "T00:00:00Z") - start) / 86400_000) + 1,
           title: String(d.title || plan.get(date) || "旅途中的一天"),
           plan: plan.get(date) ?? "",
           text: String(d.text ?? ""),
-          photos: (JSON.parse((d.photo_ids as string) || "[]") as string[]).map((id) => photoBase + id),
+          photos: (JSON.parse((d.photo_ids as string) || "[]") as string[]).map((id) => {
+            const l = layout.get(id);
+            return { src: photoBase + id, para: l?.para, caption: l?.caption };
+          }),
         };
       });
     const html = renderDiaryPage({

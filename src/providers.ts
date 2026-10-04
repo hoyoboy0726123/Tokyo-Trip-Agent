@@ -27,7 +27,7 @@ export function geminiProvider(env: Env, model?: string, gate?: GeminiGate): Pro
   return {
     id: "gemini",
     model: m,
-    async generate({ system, turns, tools, onDelta, json }) {
+    async generate({ system, turns, tools, onDelta, json, timeoutMs }) {
       if (!env.GEMINI_API_KEY) throw new Error("尚未設定 GEMINI_API_KEY");
       const body: Record<string, unknown> = {
         systemInstruction: { parts: [{ text: system }] },
@@ -54,7 +54,7 @@ export function geminiProvider(env: Env, model?: string, gate?: GeminiGate): Pro
       const res = await fetch(url, {
         method: "POST",
         // 串流卡住時整段放棄，改用備援模型，避免聊天室一直顯示「思考中」
-        signal: AbortSignal.timeout(45_000),
+        signal: AbortSignal.timeout(timeoutMs ?? 45_000),
         headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY.trim() },
         body: JSON.stringify(body),
       });
@@ -117,7 +117,7 @@ export function workersAIProvider(env: Env, model?: string): Provider {
   return {
     id: "workers-ai",
     model: m,
-    async generate({ system, turns, tools, onDelta, json }) {
+    async generate({ system, turns, tools, onDelta, json, maxTokens }) {
       const messages: any[] = [{ role: "system", content: system + (json ? "\n只輸出 JSON，不要任何其他文字。" : "") }];
       for (const t of turns) {
         const texts: string[] = [];
@@ -144,7 +144,7 @@ export function workersAIProvider(env: Env, model?: string): Provider {
       // Gemma 4 預設會先長篇「思考」：一句話要 20–30 秒、額度多用 16 倍，還會把輸出空間用完。關掉後約 1 秒
       const input: Record<string, unknown> = {
         messages,
-        max_tokens: 2048,
+        max_tokens: maxTokens ?? 2048,
         temperature: json ? 0.2 : 0.6,
         chat_template_kwargs: { enable_thinking: false },
       };

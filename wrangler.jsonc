@@ -18,6 +18,7 @@
   "vars": {
     "GEMINI_MODEL": "gemini-3.5-flash-lite",
     "GEMINI_BACKUP_MODEL": "gemini-3.1-flash-lite",
+    "GEMINI_WRITER_MODEL": "gemini-3.8-flash",
     "GEMINI_RPM": "15",
     "GEMINI_TPM": "250000",
     "GEMINI_RPD": "500",

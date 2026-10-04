@@ -1850,7 +1850,7 @@ function renderDiaryEditor(st, b) {
       <input id="de-title" maxlength="40" value="${escapeHtml(e.title)}" />
       <label class="small muted" for="de-text">內文（段落之間空一行）</label>
       <textarea id="de-text" rows="12">${escapeHtml(e.text)}</textarea>
-      <div class="small muted">照片 ${n} 張・第一張是這天的大圖，用 ◀ ▶ 調整順序</div>
+      <div class="small muted">照片 ${n} 張・依順序穿插在文章裡（第一張也是這天的封面），用 ◀ ▶ 調整順序</div>
       <div class="de-photos">
         ${e.photos
           .map(
