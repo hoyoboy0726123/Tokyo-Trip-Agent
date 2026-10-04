@@ -84,6 +84,12 @@ function stripSpeakerTag(text: string): string {
   return text.replace(/^\s*［[^］\n]{1,16}］\s*/, "");
 }
 
+/** 對話紀錄裡標出「這則是在回覆誰的哪句話」 */
+function replyNote(meta: string | null, max: number): string {
+  const r = meta ? JSON.parse(meta).reply : null;
+  return r ? `（回覆 ${r.author}：「${String(r.text).replace(/\s+/g, " ").slice(0, max)}」）` : "";
+}
+
 /** 分享連結用的隨機碼（24 個網址安全字元，猜不到） */
 function randomToken(): string {
   return btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(18)))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -359,11 +365,14 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
         const loc = msg.location && Number.isFinite(msg.location.lat) ? msg.location : null;
         if (!text && !photoId && !loc) return;
         if (loc) this.saveLocation(user.name, loc);
+        // 回覆某一則訊息：記下被回覆的是誰說的、說了什麼（畫面上顯示引用，AI 追問時也看得到）
+        const quoted = typeof msg.replyTo === "string" ? this.sql.exec<MessageRow>("SELECT * FROM messages WHERE id = ?", msg.replyTo).toArray()[0] : undefined;
+        const reply = quoted ? { id: quoted.id, author: quoted.author, text: String(quoted.text ?? "").slice(0, 300) || (quoted.photo_id ? "（照片）" : "") } : null;
         const row = this.insertMessage({
-          author: user.name, role: "user", text, photo_id: photoId, lat: loc?.lat ?? null, lon: loc?.lon ?? null, meta: null,
+          author: user.name, role: "user", text, photo_id: photoId, lat: loc?.lat ?? null, lon: loc?.lon ?? null, meta: reply ? JSON.stringify({ reply }) : null,
         });
         this.broadcast({ type: "message", message: this.publicMessage(row) });
-        if (this.shouldReply(text, !!photoId)) {
+        if (this.shouldReply(text, !!photoId, quoted?.role === "assistant")) {
           const job = this.queue.then(() => this.runAgent(row, user));
           this.queue = job.catch(() => {});
           await job;
@@ -412,8 +421,9 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     this.broadcastPresence();
   }
 
-  private shouldReply(text: string, hasPhoto: boolean): boolean {
+  private shouldReply(text: string, hasPhoto: boolean, toAi = false): boolean {
     if (!text && !hasPhoto) return false; // 單純分享位置不打擾 AI
+    if (toAi) return true; // 回覆 AI 的訊息＝在問 AI，「只回 @AI」模式也要回答
     if (this.settings().replyMode === "all") return true;
     return /@(ai|AI|旅伴|助理|小幫手)/.test(text) || text.startsWith("/ai") || (hasPhoto && /@/.test(text));
   }
@@ -1430,6 +1440,15 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 安全第一：遇到緊急狀況提供日本緊急電話（警察 110、救護/消防 119）與最近的醫院資訊。`;
   }
 
+  /** 這次的問題是在回覆哪一則訊息：給模型完整原文（可能早就超出最近的對話紀錄） */
+  private replyContext(trigger: MessageRow): string {
+    const reply = trigger.meta ? JSON.parse(trigger.meta).reply : null;
+    if (!reply) return "";
+    const full = this.sql.exec<MessageRow>("SELECT author, text FROM messages WHERE id = ?", reply.id).toArray()[0];
+    const text = String(full?.text ?? reply.text ?? "").slice(0, 2000);
+    return `（我在回覆 ${full?.author ?? reply.author} 的這則訊息，請針對它回答：「${text}」）\n`;
+  }
+
   private buildTurns(history: MessageRow[], trigger: MessageRow, image: Part | null): Turn[] {
     const turns: Turn[] = [];
     const push = (role: Turn["role"], text: string) => {
@@ -1441,13 +1460,13 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       if (m.id === trigger.id) continue;
       if (m.role === "assistant") push("model", m.text.slice(0, HISTORY_CHARS) || "（略）");
       else if (m.role === "user") {
-        let t = `［${m.author}］${m.text.slice(0, HISTORY_CHARS)}`;
+        let t = `［${m.author}］${replyNote(m.meta, 150)}${m.text.slice(0, HISTORY_CHARS)}`;
         if (m.photo_id) t += "（附了一張照片）";
         if (m.lat != null) t += `（分享位置 ${m.lat?.toFixed(5)},${m.lon?.toFixed(5)}）`;
         push("user", t);
       }
     }
-    let t = `［${trigger.author}］${trigger.text || (trigger.photo_id ? "請看這張照片" : "")}`;
+    let t = `［${trigger.author}］${this.replyContext(trigger)}${trigger.text || (trigger.photo_id ? "請看這張照片" : "")}`;
     if (trigger.lat != null) {
       const area = this.memberLocation(trigger.author)[0]?.area;
       t += `（我目前的位置：${area ? `${area}附近，` : ""}座標 ${trigger.lat?.toFixed(5)},${trigger.lon?.toFixed(5)}。位置可能變了，需要地點資訊請用工具重新查詢，不要沿用之前的回答）`;

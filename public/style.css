@@ -141,6 +141,16 @@ input, textarea, select { font: inherit; color: inherit; }
 .gallery figcaption b { color: var(--ink); }
 .gallery figcaption a { color: var(--muted); }
 .tool-chip { display: inline-flex; align-items: center; background: var(--red-soft); color: var(--red-ink); border-radius: 10px; padding: 2px 8px; font-size: 12px; font-weight: 700; }
+/* 回覆：輸入框上方的「回覆誰」，訊息裡的引用 */
+.reply-bar { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; padding: 4px 4px 4px 12px; border-left: 3px solid var(--red); border-radius: 10px; background: var(--card); font-size: 13px; color: var(--muted); }
+.reply-bar svg { flex: none; width: 16px; height: 16px; color: var(--red-ink); }
+.reply-bar span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.reply-bar b { margin-right: 6px; color: var(--ink); }
+.reply-bar .icon { width: 36px; height: 36px; font-size: 15px; }
+.quote { display: block; width: 100%; margin: 0 0 6px; padding: 4px 10px; border: 0; border-left: 3px solid var(--red); border-radius: 8px; background: rgba(127, 127, 127, .12); color: inherit; font: inherit; font-size: 12.5px; line-height: 1.5; text-align: left; cursor: pointer; }
+.quote b { display: block; font-size: 12px; }
+.quote span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; opacity: .85; }
+.msg.me .quote { background: rgba(255, 255, 255, .18); border-left-color: rgba(255, 255, 255, .85); }
 /* 複製／置頂：AI 回答固定顯示，家人的訊息點一下才出現 */
 .msg-actions { display: flex; gap: 6px; }
 .ai-card .msg-actions { justify-content: flex-end; }

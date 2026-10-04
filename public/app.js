@@ -4,7 +4,7 @@ const els = {
   login: $("#login"), loginForm: $("#login-form"), loginName: $("#login-name"), loginPassword: $("#login-password"), loginError: $("#login-error"),
   app: $("#app"), messages: $("#messages"), loadMore: $("#load-more"), toLatest: $("#to-latest"), toLatestN: $("#to-latest-n"), conn: $("#conn"),
   dayBadge: $("#day-badge"), todayTitle: $("#today-title"), online: $("#online"), avatars: $("#avatars"), chips: $("#chips"),
-  pinBar: $("#pin-bar"), pins: $("#pins"), pinList: $("#pin-list"),
+  replyBar: $("#reply-bar"), pinBar: $("#pin-bar"), pins: $("#pins"), pinList: $("#pin-list"),
   nextCard: $("#next-card"), ncToggle: $("#nc-toggle"), chipsToggle: $("#chips-toggle"), tabbar: $("#tabbar"), more: $("#more"), moreActions: $("#more-actions"), moreAsks: $("#more-asks"),
   input: $("#input"), sendForm: $("#send-form"), sendBtn: $("#send-btn"), photoInput: $("#photo-input"),
   attach: $("#attach"), attachImg: $("#attach-img"), attachLoc: $("#attach-loc"), attachClear: $("#attach-clear"),
@@ -55,6 +55,7 @@ const ICONS = {
   help: '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"/>',
   wallet: '<path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/>',
   chev: '<path d="m9 18 6-6-6-6"/>',
+  reply: '<polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>',
   copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   pushpin: '<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>',
 };
@@ -302,6 +303,8 @@ function messageNode(msg) {
   node.dataset.id = msg.id;
   node.dataset.ts = msg.ts;
   let body = "";
+  // 這則是在回覆別的訊息：上面顯示引用，點一下跳回原訊息
+  if (!isAI && msg.meta?.reply) body += `<button type="button" class="quote" data-quote="${escapeHtml(msg.meta.reply.id)}"><b>${escapeHtml(msg.meta.reply.author)}</b><span>${escapeHtml(plainExcerpt({ text: msg.meta.reply.text }))}</span></button>`;
   if (msg.photo) body += `<img class="photo" src="${msg.photo}" loading="lazy" alt="照片" />`;
   if (msg.location) {
     const url = `https://www.google.com/maps/search/?api=1&query=${msg.location.lat},${msg.location.lon}`;
@@ -311,7 +314,7 @@ function messageNode(msg) {
   if (msg.text) body += isAI ? `<div class="msg-text">${md(msg.text)}</div>` : `<span class="msg-text">${escapeHtml(msg.text).replace(/\n/g, "<br>")}</span>`;
   const pinned = S.pinned?.has(msg.id);
   if (pinned) node.classList.add("pinned");
-  const actions = `<div class="msg-actions"><button type="button" data-act="copy">${svg("copy")}<span>複製</span></button><button type="button" data-act="pin">${svg("pushpin")}<span>${pinned ? "取消置頂" : "置頂"}</span></button></div>`;
+  const actions = `<div class="msg-actions"><button type="button" data-act="reply">${svg("reply")}<span>回覆</span></button><button type="button" data-act="copy">${svg("copy")}<span>複製</span></button><button type="button" data-act="pin">${svg("pushpin")}<span>${pinned ? "取消置頂" : "置頂"}</span></button></div>`;
   const images = (msg.meta?.images ?? []).filter((im) => typeof im.src === "string" && (im.src.startsWith("/api/img?") || im.src.startsWith("/api/photo/")));
   const webImages = images.some((im) => im.src.startsWith("/api/img?"));
   if (images.length) {
@@ -390,12 +393,43 @@ els.messages.addEventListener("click", (e) => {
   if (btn) {
     const msgEl = btn.closest(".msg");
     if (btn.dataset.act === "copy") copyText(msgEl.querySelector(".msg-text")?.innerText.trim() || "", btn);
+    else if (btn.dataset.act === "reply") startReply(msgEl);
     else action({ action: S.pinned?.has(msgEl.dataset.id) ? "unpin" : "pin", id: msgEl.dataset.id });
+    return;
+  }
+  const quote = e.target.closest(".quote");
+  if (quote) {
+    const orig = els.messages.querySelector(`.msg[data-id="${quote.dataset.quote}"]`);
+    if (orig) {
+      orig.scrollIntoView({ block: "center", behavior: "smooth" });
+      orig.classList.remove("flash");
+      requestAnimationFrame(() => orig.classList.add("flash"));
+    }
     return;
   }
   // 家人的訊息點一下才出現「複製／置頂」，畫面比較乾淨
   const bubble = e.target.closest(".msg:not(.ai) .bubble");
   if (bubble && !e.target.closest("a, img")) bubble.closest(".msg").classList.toggle("show-actions");
+});
+
+/** 回覆某一則訊息：輸入框上方顯示要回覆的內容，送出時一起帶給 AI */
+function startReply(msgEl) {
+  const author = msgEl.classList.contains("ai") ? S.aiName : msgEl.classList.contains("me") ? S.me.name : (msgEl.querySelector(".name")?.textContent || "").split("・")[0];
+  const text = (msgEl.querySelector(".msg-text")?.innerText || "").replace(/\s+/g, " ").trim();
+  S.replyTo = { id: msgEl.dataset.id, author, text: text.slice(0, 80) || "（照片）" };
+  renderReplyBar();
+  els.input.focus();
+}
+
+function renderReplyBar() {
+  const r = S.replyTo;
+  els.replyBar.hidden = !r;
+  if (r) els.replyBar.innerHTML = `${svg("reply")}<span><b>回覆 ${escapeHtml(r.author)}</b>${escapeHtml(r.text)}</span><button type="button" class="icon" aria-label="取消回覆">✕</button>`;
+}
+els.replyBar.addEventListener("click", (e) => {
+  if (!e.target.closest("button")) return;
+  S.replyTo = null;
+  renderReplyBar();
 });
 
 async function copyText(text, btn) {
@@ -423,7 +457,7 @@ async function copyText(text, btn) {
 }
 
 function plainExcerpt(msg) {
-  const t = String(msg.text || "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[#*_`>|]/g, "").replace(/\s+/g, " ").trim();
+  const t = String(msg.text || "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/^\s*(?:[-•]|\d+\.)\s+/gm, "").replace(/[#*_`>|]/g, "").replace(/\s+/g, " ").trim();
   return t.slice(0, 80) || (msg.photo ? "（照片）" : msg.location ? "（位置）" : "");
 }
 
@@ -790,7 +824,9 @@ els.sendForm.addEventListener("submit", async (e) => {
       if (!res.ok) throw new Error(`照片上傳失敗（${res.status}）`);
       photoId = (await res.json()).id;
     }
-    if (wsSend({ type: "send", text, photoId, location: loc })) {
+    if (wsSend({ type: "send", text, photoId, location: loc, replyTo: S.replyTo?.id })) {
+      S.replyTo = null;
+      renderReplyBar();
       els.input.value = "";
       autoGrow();
       clearAttachment();
