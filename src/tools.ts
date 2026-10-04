@@ -90,6 +90,13 @@ export interface DraftInput {
 
 const REPLACES_PARAM = { type: "integer", description: "修正還沒確認的卡片時，填那張卡片的編號（見系統提示「等待成員確認的卡片」）" };
 
+/** 民宿：模型寫「民宿」「IKEBUKURO 4」或自己打的地址常跑錯地方，一律換成正確地址 */
+const HOME_ADDRESS = "東京都豊島区要町1-44-8";
+const HOME_ALIAS = /^(我們的?|回)?(民宿|住宿|住的地方|飯店|旅館|airbnb)$|IKEBUKURO\s*4|要町\s*1-44-8|セレッソ|Seresso/i;
+function homeOr(place: string): string {
+  return HOME_ALIAS.test(place.trim()) ? HOME_ADDRESS : place;
+}
+
 function money(amount: number, currency: string): string {
   const n = Number(amount).toLocaleString("en-US", { maximumFractionDigits: Math.abs(amount) >= 100 ? 0 : 2 });
   return currency === "JPY" ? `¥${n}` : currency === "TWD" ? `NT$${n}` : `${n} ${currency}`;
@@ -677,7 +684,7 @@ export const TOOLS: Tool[] = [
     label: "🚃 規劃路線",
     decl: {
       name: "plan_route",
-      description: "產生 Google Maps 導航連結（大眾運輸/步行/開車）。詳細轉乘與票價請搭配 web_search 查詢。起點留空=發問者目前位置或住宿。",
+      description: "產生 Google Maps 導航連結（大眾運輸/步行/開車）。詳細轉乘與票價請搭配 web_search 查詢。起點留空=發問者目前位置或住宿。要回民宿 destination 填「民宿」（系統會換成正確地址）。",
       parameters: {
         type: "object",
         properties: {
@@ -692,15 +699,17 @@ export const TOOLS: Tool[] = [
       let origin = args.origin as string | undefined;
       if (!origin) {
         const mine = room.memberLocation(author)[0];
-        origin = mine && Date.now() - mine.ts < 3 * 3600_000 ? `${mine.lat},${mine.lon}` : TRIP.accommodation.address;
+        origin = mine && Date.now() - mine.ts < 3 * 3600_000 ? `${mine.lat},${mine.lon}` : HOME_ADDRESS;
       }
+      origin = homeOr(origin);
       const mode = args.mode || "transit";
       const u = new URL("https://www.google.com/maps/dir/");
       u.searchParams.set("api", "1");
       u.searchParams.set("origin", origin);
-      u.searchParams.set("destination", args.destination);
+      const destination = homeOr(String(args.destination));
+      u.searchParams.set("destination", destination);
       u.searchParams.set("travelmode", mode);
-      return { origin, destination: args.destination, mode, google_maps: u.toString() };
+      return { origin, destination, mode, google_maps: u.toString() };
     },
   },
   {

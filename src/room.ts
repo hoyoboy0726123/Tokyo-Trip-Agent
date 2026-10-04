@@ -3,7 +3,7 @@ import { safeEqual } from "./auth";
 import { parseArgs, providerFor, type GeminiGate } from "./providers";
 import { GeminiLimiter, RateLimitedError } from "./ratelimit";
 import { DRAFT_TOOLS, japanAlerts, reverseArea, runTool, SCALE_TEXT, toolLabel, TOOL_DECLS, type AttachedImage, type DraftInput, type ExpenseInput, type RoomApi } from "./tools";
-import { fixMapLinks } from "./maplinks";
+import { fixMapLinks, type MapFixOptions } from "./maplinks";
 import { renderDiaryPage } from "./diary-page";
 import { looksJapanese, translate, type Lang } from "./translate";
 import { DEFAULT_CHECKLIST, DEFAULT_PHRASES, INITIAL_ITINERARY, TRIP } from "./trip-data";
@@ -78,6 +78,11 @@ function requiredTool(text: string, used: string[], hasPhoto: boolean): string |
 function expenseBrief(r: Record<string, SqlStorageValue>) {
   return { id: r.id as number, date: r.date as string, description: r.description as string, amount: r.amount as number, currency: r.currency as string, payer: r.payer as string };
 }
+
+/** 民宿的專有寫法（房源名稱、地址、大樓名），出現在地圖連結裡就換成正確的位置 */
+const HOME_NAMES = /IKEBUKURO\s*4|要町\s*1-44-8|1-44-8|セレッソ|Seresso/i;
+/** 導航用的民宿地址（不含郵遞區號與大樓名，Google 地圖最穩） */
+const HOME_ADDRESS = "東京都豊島区要町1-44-8";
 
 /** 模型偶爾學對話紀錄的格式，回答開頭多一個「［爸爸］」，存檔前拿掉 */
 function stripSpeakerTag(text: string): string {
@@ -1077,7 +1082,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
 
   /** 以 AI 身分在群組發一則訊息（提醒、早報、日記、警報共用） */
   private postAiMessage(text: string, meta: Record<string, unknown>) {
-    const row = this.insertMessage({ author: AI_NAME, role: "assistant", text: fixMapLinks(text), photo_id: null, lat: null, lon: null, meta: JSON.stringify(meta) });
+    const row = this.insertMessage({ author: AI_NAME, role: "assistant", text: fixMapLinks(text, this.mapFix()), photo_id: null, lat: null, lon: null, meta: JSON.stringify(meta) });
     this.broadcast({ type: "message", message: this.publicMessage(row) });
     return row;
   }
@@ -1421,6 +1426,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 記帳（add_expense）、修改行程（update_itinerary）、刪除帳目或提醒：工具只會在你的回答下方產生確認卡片，要等成員按「確認」才會寫入。呼叫後用一兩句話說明你看到的內容（照片上的店名、日期、金額…）和準備寫入的內容，請成員核對卡片；絕對不要說「已記好／已更新／已刪除」。資料有疑問（日期不在旅遊期間、金額或幣別看不清楚、不確定誰付的）就先直接問成員，等成員回答再呼叫工具。成員要修改還沒確認的卡片，就重新呼叫同一個工具並在 replaces 填舊卡片編號。卡片只能靠呼叫工具產生，不要在回答裡自己寫卡片內容。還沒確認的卡片不用刪，請成員直接按卡片上的「取消」。
 - 提到日圓價格時附上約合台幣（用 convert_currency）。
 - 問路：用 plan_route 給 Google Maps 連結，必要時用 web_search 補充轉乘與票價。
+- 民宿的位置一律用房東給的地圖連結 ${a.googleMap}；要帶路回民宿就用 plan_route，destination 填「民宿」。不要用「IKEBUKURO 4」或自己打的地址搜尋（會跑到池袋四丁目或錯的地方）。
 - 地圖連結：工具回傳的連結可以直接用；其他地點一律寫成 [📍地點名稱](map)，系統會自動換成 Google 地圖搜尋連結（地點名稱用日文或英文的正式名稱，可加地區，例如 [📍ドン・キホーテ 池袋駅西口店](map)）。不要自己寫 Google 地圖網址，絕對不要編 maps.app.goo.gl 短網址，也不要用自己記得的地址或座標當連結（記錯一個字就會指到別的地方）。
 - 成員在哪裡，一律以「成員最近位置」或訊息裡附的地名為準，絕對不要自己猜地名；以前聊天裡說過的位置可能已經過時，不要沿用。
 - 每次有人問「附近」都要重新呼叫工具查詢，不可以沿用之前的回答。
@@ -1438,6 +1444,12 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 成員做了決定、說了偏好、訂了東西 → 主動用 remember 記下來；行程要改就用 update_itinerary 產生修改卡片。只有 remember 成功後才能說「已記住」；沒有呼叫工具就不要聲稱已記住（系統也會在背景定期自動整理記憶）。
 - 收到照片：辨識菜單、商品、看板、車票並翻譯說明；商品可以查價比價並試算免稅（tax_free_check）。
 - 安全第一：遇到緊急狀況提供日本緊急電話（警察 110、救護/消防 119）與最近的醫院資訊。`;
+  }
+
+  /** 地圖連結修正：房東給的民宿地圖保留；提到民宿的連結一律換成正確的位置與地址（用房源名稱「IKEBUKURO 4」搜尋會跑到池袋四丁目） */
+  private mapFix(): MapFixOptions {
+    const a = TRIP.accommodation;
+    return { keep: [a.googleMap], home: { names: HOME_NAMES, search: a.googleMap, dest: HOME_ADDRESS } };
   }
 
   /** 這次的問題是在回覆哪一則訊息：給模型完整原文（可能早就超出最近的對話紀錄） */
@@ -1607,7 +1619,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
         }
         if (!finalText.trim()) finalText = images.length ? "幫你找到這些圖片 👇（網路圖片，僅供參考）" : "嗯…我沒有想到好的回答，可以換個方式問我嗎？";
         const row = this.insertMessage({
-          id, author: AI_NAME, role: "assistant", text: fixMapLinks(stripSpeakerTag(finalText)), photo_id: null, lat: null, lon: null,
+          id, author: AI_NAME, role: "assistant", text: fixMapLinks(stripSpeakerTag(finalText), this.mapFix()), photo_id: null, lat: null, lon: null,
           meta: JSON.stringify({
             provider: provider.id, model: provider.model, tools: [...new Set(toolsUsed)].map(toolLabel),
             ...(images.length ? { images } : {}),
