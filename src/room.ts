@@ -169,6 +169,10 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     if (!this.sql.exec("PRAGMA table_info(diaries)").toArray().some((c) => c.name === "title")) this.sql.exec("ALTER TABLE diaries ADD COLUMN title TEXT");
     // v7：置頂訊息（全家共用，等一下還要再看的資訊不會被洗掉）
     this.sql.exec("CREATE TABLE IF NOT EXISTS pins (message_id TEXT PRIMARY KEY, ts INTEGER, by TEXT)");
+    // 家人修改日記：記下最後是誰改的
+    for (const col of ["edited_by TEXT", "edited_at INTEGER"]) {
+      if (!this.sql.exec("PRAGMA table_info(diaries)").toArray().some((c) => c.name === col.split(" ")[0])) this.sql.exec(`ALTER TABLE diaries ADD COLUMN ${col}`);
+    }
     if (!this.setting("checklist_seeded")) {
       for (const c of DEFAULT_CHECKLIST) {
         this.sql.exec("INSERT INTO checklist (list, item, for_whom, author, ts) VALUES (?, ?, '', '預設', ?)", c.list, c.item, Date.now());
@@ -496,6 +500,28 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
         if (!user.admin) return reply(false, "只有管理員可以使用");
         await this.writeDiary(jstNow().date);
         break;
+      // 家人修改日記：標題、內文、照片（只能用已上傳的照片）；有人同時在改就擋下，免得互相蓋掉
+      case "diary_edit": {
+        const date = String(msg.date ?? "");
+        const row = this.sql.exec("SELECT ts FROM diaries WHERE date = ?", date).toArray()[0];
+        if (!row) return reply(false, "找不到這天的日記");
+        if (Number(msg.base) !== Number(row.ts)) return reply(false, "剛剛有人修改過這篇日記，請回上一頁重新打開再改");
+        const title = String(msg.title ?? "").trim().slice(0, 40);
+        const text = String(msg.text ?? "").trim().slice(0, 6000);
+        const ids = (Array.isArray(msg.photos) ? msg.photos : []).map(String).filter((id: string) => /^[\w-]+$/.test(id)).slice(0, 30);
+        const known = new Set(
+          ids.length ? this.sql.exec(`SELECT id FROM photos WHERE id IN (${ids.map(() => "?").join(",")})`, ...ids).toArray().map((r) => r.id as string) : [],
+        );
+        const photos = [...new Set(ids.filter((id: string) => known.has(id)))];
+        if (!title && !text && !photos.length) return reply(false, "日記不能全部清空");
+        const now = Date.now();
+        this.sql.exec(
+          "UPDATE diaries SET title = ?, text = ?, photo_ids = ?, ts = ?, edited_by = ?, edited_at = ? WHERE date = ?",
+          title, text, JSON.stringify(photos), now, user.name, now, date,
+        );
+        this.broadcastState();
+        break;
+      }
       case "pin": {
         const id = String(msg.id ?? "");
         if (!this.sql.exec("SELECT 1 FROM messages WHERE id = ?", id).toArray().length) return reply(false, "找不到這則訊息");
@@ -1130,7 +1156,7 @@ ${transcript || "（今天群組沒什麼對話）"}`;
       title = today ? String(today.title) : "旅途中的一天";
     }
     this.sql.exec(
-      "INSERT INTO diaries (date, ts, title, text, photo_ids) VALUES (?, ?, ?, ?, ?) ON CONFLICT(date) DO UPDATE SET ts = excluded.ts, title = excluded.title, text = excluded.text, photo_ids = excluded.photo_ids",
+      "INSERT INTO diaries (date, ts, title, text, photo_ids) VALUES (?, ?, ?, ?, ?) ON CONFLICT(date) DO UPDATE SET ts = excluded.ts, title = excluded.title, text = excluded.text, photo_ids = excluded.photo_ids, edited_by = NULL, edited_at = NULL",
       date, Date.now(), title, text, JSON.stringify(photos),
     );
     if (announce) {
@@ -1260,7 +1286,7 @@ ${transcript || "（今天群組沒什麼對話）"}`;
       checklist: this.checklistGet(),
       reminders: this.reminderList(),
       documents: this.documentFind().map((d) => ({ id: d.id, title: d.title, note: d.note, author: d.author, ts: d.ts, photo: `/api/photo/${d.photo_id}` })),
-      diaries: this.sql.exec("SELECT date, ts, title, text, photo_ids FROM diaries ORDER BY date DESC").toArray(),
+      diaries: this.sql.exec("SELECT date, ts, title, text, photo_ids, edited_by, edited_at FROM diaries ORDER BY date DESC").toArray(),
       // 置頂訊息附完整內容：訊息再舊、畫面上沒載入也看得到
       pins: this.sql
         .exec<MessageRow & { pin_ts: number; pin_by: string }>("SELECT m.*, p.ts AS pin_ts, p.by AS pin_by FROM pins p JOIN messages m ON m.id = p.message_id ORDER BY p.ts DESC")

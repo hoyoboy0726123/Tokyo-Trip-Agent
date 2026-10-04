@@ -264,6 +264,18 @@ function handle(m) {
       if (m.action === "translate" || m.action === "add_phrase") trActionDone(m);
       // 卡片按了但失敗（例如別人已經處理過）：把按鈕恢復，畫面會跟著伺服器的狀態更新
       if (!m.ok && (m.action === "draft_confirm" || m.action === "draft_cancel")) document.querySelectorAll(".draft-actions button:disabled").forEach((x) => (x.disabled = false));
+      if (m.action === "diary_edit") {
+        if (m.ok) {
+          S.diaryEdit = null;
+          if (S.panel === "diary-edit") openPanel("diary");
+        } else {
+          const sv = $("#de-save");
+          if (sv) {
+            sv.disabled = false;
+            sv.textContent = "儲存";
+          }
+        }
+      }
       if (!m.ok && m.error) alert(m.error);
       else if (m.ok && m.action === "reset") alert("已清除 ✅");
       break;
@@ -1011,7 +1023,8 @@ function setState(state) {
   els.todayTitle.textContent = t.title;
   els.dayBadge.textContent = day < 1 ? `倒數 ${1 - day} 天` : now <= t.endDate ? `Day ${day}` : "旅程結束";
   renderNextCard(state, now);
-  if (S.panel && S.panel !== "settings") renderPanel();
+  // 正在編輯日記時不重畫，免得打到一半的字被別人的動作洗掉
+  if (S.panel && !["settings", "diary-edit"].includes(S.panel)) renderPanel();
   const usage = document.querySelector("#gemini-usage");
   if (usage) usage.textContent = geminiUsageText(state.gemini);
 }
@@ -1160,7 +1173,7 @@ function renderPanelInner() {
     b.innerHTML = `<div class="card small muted">目前沒有網路，這個功能暫時不能用。翻譯常用句和票券保管箱離線也能看。</div>`;
     return;
   }
-  if (["hub", "guide", "map", "checklist", "tickets", "reminders", "diary"].includes(S.panel)) return renderToolPanel(st, b);
+  if (["hub", "guide", "map", "checklist", "tickets", "reminders", "diary", "diary-edit"].includes(S.panel)) return renderToolPanel(st, b);
   switch (S.panel) {
     case "itinerary": {
       els.panelTitle.textContent = "📅 行程";
@@ -1401,6 +1414,9 @@ function renderToolPanel(st, b) {
       break;
     case "diary":
       renderDiaryPanel(st, b);
+      break;
+    case "diary-edit":
+      renderDiaryEditor(st, b);
       break;
   }
 }
@@ -1750,7 +1766,11 @@ function renderDiaryPanel(st, b) {
                 <p>${escapeHtml(excerpt)}…</p>
               </div>
             </a>
-            ${S.me.admin ? `<button type="button" class="btn small" data-rewrite="${escapeHtml(d.date)}">重寫這篇</button>` : ""}
+            <div class="diary-card-btns">
+              ${d.edited_by ? `<span class="small muted">${escapeHtml(d.edited_by)} 修改過</span>` : ""}
+              <button type="button" class="btn small" data-edit-diary="${escapeHtml(d.date)}">編輯文字與照片</button>
+              ${S.me.admin ? `<button type="button" class="btn small" data-rewrite="${escapeHtml(d.date)}" data-edited="${escapeHtml(d.edited_by || "")}">AI 重寫</button>` : ""}
+            </div>
           </div>`;
         }).join("")
       : `<div class="card small muted">還沒有日記</div>`}`;
@@ -1763,14 +1783,114 @@ function renderDiaryPanel(st, b) {
   $("#diary-share-off", b)?.addEventListener("click", () => {
     if (confirm("關閉後，之前分享出去的連結都會失效。確定關閉？")) action({ action: "share_off" });
   });
+  b.querySelectorAll("[data-edit-diary]").forEach((x) =>
+    x.addEventListener("click", () => {
+      const d = ds.find((y) => y.date === x.dataset.editDiary);
+      S.diaryEdit = { date: d.date, title: d.title || "", text: d.text || "", photos: JSON.parse(d.photo_ids || "[]"), base: d.ts, editedBy: d.edited_by || "", dirty: false };
+      openPanel("diary-edit");
+    }),
+  );
   b.querySelectorAll("[data-rewrite]").forEach((x) =>
     x.addEventListener("click", () => {
-      if (!confirm(`用 ${x.dataset.rewrite.slice(5).replace("-", "/")} 的對話和照片重新寫這篇日記？（不會在群組重貼）`)) return;
+      const warn = x.dataset.edited ? `\n\n⚠️ ${x.dataset.edited} 修改過這篇，重寫會蓋掉家人改的文字和照片。` : "";
+      if (!confirm(`用 ${x.dataset.rewrite.slice(5).replace("-", "/")} 的對話和照片重新寫這篇日記？（不會在群組重貼）${warn}`)) return;
       x.disabled = true;
       x.textContent = "重寫中，約需 30 秒…";
       action({ action: "diary_rewrite", date: x.dataset.rewrite });
     }),
   );
+}
+
+// 家人修改日記：標題、內文、照片（新增、移除、調順序；第一張是這天的大圖）
+function renderDiaryEditor(st, b) {
+  const e = S.diaryEdit;
+  if (!e) return openPanel("diary");
+  els.panelTitle.textContent = `編輯 ${dateLabel(e.date)} 的日記`;
+  const n = e.photos.length;
+  b.innerHTML = `
+    <button type="button" class="btn small" id="de-back">← 旅遊日記</button>
+    <div class="card diary-edit">
+      <label class="small muted" for="de-title">標題</label>
+      <input id="de-title" maxlength="40" value="${escapeHtml(e.title)}" />
+      <label class="small muted" for="de-text">內文（段落之間空一行）</label>
+      <textarea id="de-text" rows="12">${escapeHtml(e.text)}</textarea>
+      <div class="small muted">照片 ${n} 張・第一張是這天的大圖，用 ◀ ▶ 調整順序</div>
+      <div class="de-photos">
+        ${e.photos
+          .map(
+            (id, i) => `<figure>
+          <img src="/api/photo/${escapeHtml(id)}" loading="lazy" alt="" />
+          ${i === 0 ? `<span class="de-cover">大圖</span>` : ""}
+          <div class="de-ph-btns">
+            <button type="button" data-mv="${i}:-1" ${i === 0 ? "disabled" : ""} aria-label="往前">◀</button>
+            <button type="button" data-rm="${i}" aria-label="移除">✕</button>
+            <button type="button" data-mv="${i}:1" ${i === n - 1 ? "disabled" : ""} aria-label="往後">▶</button>
+          </div>
+        </figure>`,
+          )
+          .join("")}
+        <label class="de-add">${svg("plus")}<span>${e.uploading || "新增照片"}</span><input type="file" accept="image/*" multiple hidden /></label>
+      </div>
+      ${e.editedBy ? `<div class="small muted">上次修改：${escapeHtml(e.editedBy)}</div>` : ""}
+      <div class="diary-row"><button type="button" class="btn" id="de-cancel">取消</button><button type="button" class="btn primary-sm" id="de-save">儲存</button></div>
+    </div>`;
+  const leave = () => {
+    if (e.dirty && !confirm("還沒儲存，確定放棄這些修改？")) return;
+    S.diaryEdit = null;
+    openPanel("diary");
+  };
+  $("#de-back", b).addEventListener("click", leave);
+  $("#de-cancel", b).addEventListener("click", leave);
+  $("#de-title", b).addEventListener("input", (ev) => {
+    e.title = ev.target.value;
+    e.dirty = true;
+  });
+  $("#de-text", b).addEventListener("input", (ev) => {
+    e.text = ev.target.value;
+    e.dirty = true;
+  });
+  b.querySelectorAll("[data-mv]").forEach((x) =>
+    x.addEventListener("click", () => {
+      const [i, d] = x.dataset.mv.split(":").map(Number);
+      [e.photos[i], e.photos[i + d]] = [e.photos[i + d], e.photos[i]];
+      e.dirty = true;
+      renderPanel();
+    }),
+  );
+  b.querySelectorAll("[data-rm]").forEach((x) =>
+    x.addEventListener("click", () => {
+      e.photos.splice(Number(x.dataset.rm), 1);
+      e.dirty = true;
+      renderPanel();
+    }),
+  );
+  b.querySelector(".de-add input").addEventListener("change", async (ev) => {
+    const files = [...ev.target.files];
+    for (const [k, file] of files.entries()) {
+      e.uploading = `上傳中 ${k + 1}/${files.length}…`;
+      if (S.panel === "diary-edit") renderPanel();
+      try {
+        const blob = await resizeImage(file, 1600, 0.85);
+        const res = await fetch("/api/photo", { method: "POST", headers: { "content-type": blob.type }, body: blob });
+        if (!res.ok) throw new Error(String(res.status));
+        e.photos.push((await res.json()).id);
+        e.dirty = true;
+      } catch {
+        alert(`第 ${k + 1} 張照片上傳失敗`);
+      }
+    }
+    e.uploading = "";
+    if (S.panel === "diary-edit") renderPanel();
+  });
+  $("#de-save", b).addEventListener("click", (ev) => {
+    if (!e.title.trim() && !e.text.trim() && !e.photos.length) return alert("日記不能全部清空");
+    ev.target.disabled = true;
+    ev.target.textContent = "儲存中…";
+    if (!wsSend({ type: "action", action: "diary_edit", date: e.date, title: e.title, text: e.text, photos: e.photos, base: e.base })) {
+      ev.target.disabled = false;
+      ev.target.textContent = "儲存";
+    }
+  });
 }
 
 /** 手機用分享面板（LINE、訊息…），電腦或不支援時複製連結 */

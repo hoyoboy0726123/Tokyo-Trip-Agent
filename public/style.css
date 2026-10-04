@@ -237,7 +237,19 @@ input, textarea, select { font: inherit; color: inherit; }
 .diary-kicker { font-size: 12px; font-weight: 700; color: var(--stamp); }
 .diary-card h3 { margin: 4px 0; font-family: var(--title-font); font-size: 20px; line-height: 1.35; }
 .diary-card p { margin: 0; font-size: 14px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.diary-card .btn.small { justify-self: end; }
+.diary-card-btns { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
+.diary-edit { display: grid; gap: 8px; }
+.diary-edit input, .diary-edit textarea { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: var(--bg); color: var(--ink); font: inherit; font-size: 16px; line-height: 1.6; }
+.diary-edit textarea { min-height: 260px; resize: vertical; }
+.de-photos { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 8px; }
+.de-photos figure { position: relative; margin: 0; }
+.de-photos img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 10px; background: var(--line); }
+.de-cover { position: absolute; top: 6px; left: 6px; padding: 1px 7px; border-radius: 6px; background: var(--red); color: #fff; font-size: 11px; font-weight: 700; }
+.de-ph-btns { display: flex; gap: 4px; margin-top: 4px; }
+.de-ph-btns button { flex: 1; height: 30px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--ink); font-size: 13px; }
+.de-ph-btns button:disabled { opacity: .35; }
+.de-add { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; aspect-ratio: 1; border: 1.5px dashed var(--line); border-radius: 10px; color: var(--muted); font-size: 13px; text-align: center; cursor: pointer; }
+.de-add svg { width: 22px; height: 22px; }
 
 /* ---------- 「更多」選單 ---------- */
 .sheet { width: min(560px, 100vw); max-width: 100vw; margin: auto auto 0; padding: 8px 16px calc(env(safe-area-inset-bottom) + 20px); border: 0; border-radius: 24px 24px 0 0; background: var(--card); color: var(--ink); }
