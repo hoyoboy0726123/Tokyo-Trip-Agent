@@ -20,6 +20,8 @@ interface DiaryPhoto { id: string; para: number; caption: string }
 const PHOTO_KINDS = ["景點", "風景", "美食", "人物", "購物", "交通", "住宿", "收據", "截圖", "文件", "旅途外", "其他"];
 /** 不放進日記的照片（日記會分享給親友；收據截圖沒有閱讀價值；家裡的寵物、舊照片不是這趟旅行） */
 const NOT_DIARY_PHOTO = new Set(["收據", "截圖", "文件", "旅途外"]);
+/** 照片說明的評分標準版本：標準改了就加 1，舊的說明會重看一次 */
+const PHOTO_NOTE_V = 2;
 const hhmm = (ts: number) => new Date(ts + 9 * 3600_000).toISOString().slice(11, 16);
 
 function parseJsonArray(text: string): any[] | null {
@@ -221,7 +223,8 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     // v7：置頂訊息（全家共用，等一下還要再看的資訊不會被洗掉）
     this.sql.exec("CREATE TABLE IF NOT EXISTS pins (message_id TEXT PRIMARY KEY, ts INTEGER, by TEXT)");
     // 日記挑照片用：AI 看過每張照片的說明
-    this.sql.exec("CREATE TABLE IF NOT EXISTS photo_notes (photo_id TEXT PRIMARY KEY, kind TEXT, score INTEGER, note TEXT, ts INTEGER)");
+    this.sql.exec("CREATE TABLE IF NOT EXISTS photo_notes (photo_id TEXT PRIMARY KEY, kind TEXT, score INTEGER, note TEXT, ts INTEGER, v INTEGER)");
+    if (!this.sql.exec("PRAGMA table_info(photo_notes)").toArray().some((c) => c.name === "v")) this.sql.exec("ALTER TABLE photo_notes ADD COLUMN v INTEGER");
     // 家人修改日記：記下最後是誰改的
     for (const col of ["edited_by TEXT", "edited_at INTEGER", "layout TEXT"]) {
       if (!this.sql.exec("PRAGMA table_info(diaries)").toArray().some((c) => c.name === col.split(" ")[0])) this.sql.exec(`ALTER TABLE diaries ADD COLUMN ${col}`);
@@ -1209,7 +1212,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     const notes = new Map<string, PhotoNote>();
     const ids = rows.map((m) => m.photo_id as string);
     if (!ids.length) return notes;
-    for (const r of this.sql.exec(`SELECT * FROM photo_notes WHERE photo_id IN (${ids.map(() => "?").join(",")})`, ...ids).toArray()) {
+    for (const r of this.sql.exec(`SELECT * FROM photo_notes WHERE v = ? AND photo_id IN (${ids.map(() => "?").join(",")})`, PHOTO_NOTE_V, ...ids).toArray()) {
       notes.set(r.photo_id as string, { kind: String(r.kind), score: Number(r.score), note: String(r.note) });
     }
     const todo = rows.filter((m) => !notes.has(m.photo_id as string));
@@ -1229,7 +1232,7 @@ score：當旅遊日記插圖的價值，大部分照片是 2–4 分：
 5＝一看就有故事（家人生動的表情或互動、壯觀的景色、招牌美食上桌）
 4＝好看的旅途紀錄（景點、街景、店面、美食、家人合照）
 3＝普通的紀錄
-2＝資訊類照片（菜單、時刻表、告示牌、販賣機、垃圾桶、商品包裝特寫）
+2＝資訊類照片（菜單、時刻表、告示牌、販賣機、垃圾桶、商品包裝特寫），或沒有重點的日常照（低頭滑手機、排隊等待、只拍到背影）
 1＝沒意義（模糊、隨手亂拍、看不出內容）`,
         },
       ];
@@ -1260,7 +1263,10 @@ score：當旅遊日記插圖的價值，大部分照片是 2–4 分：
           note: String(x.note ?? "").slice(0, 120),
         };
         notes.set(hit.m.photo_id as string, note);
-        this.sql.exec("INSERT OR REPLACE INTO photo_notes VALUES (?, ?, ?, ?, ?)", hit.m.photo_id, note.kind, note.score, note.note, Date.now());
+        this.sql.exec(
+          "INSERT OR REPLACE INTO photo_notes (photo_id, kind, score, note, ts, v) VALUES (?, ?, ?, ?, ?, ?)",
+          hit.m.photo_id, note.kind, note.score, note.note, Date.now(), PHOTO_NOTE_V,
+        );
       }
     }
     return notes;
@@ -1348,14 +1354,22 @@ ${transcript || "（今天群組沒什麼對話）"}`;
     const text = paragraphs.join("\n\n");
     const byTag = new Map(pool.map((m) => [tag.get(m.photo_id as string)!, m.photo_id as string]));
     const used = new Set<string>();
-    const layout: DiaryPhoto[] = marks
-      .flatMap((k) => {
-        const id = byTag.get(k.tag);
-        if (!id || used.has(id)) return [];
-        used.add(id);
-        return [{ id, para: k.para, caption: k.caption }];
-      })
-      .slice(0, 14);
+    const picked: DiaryPhoto[] = marks.flatMap((k) => {
+      const id = byTag.get(k.tag);
+      if (!id || used.has(id)) return [];
+      used.add(id);
+      return [{ id, para: k.para, caption: k.caption }];
+    });
+    // 模型常常一段塞好多張：每段最多 2 張、整篇最多 10 張，超過的留精彩度高的
+    const noteScore = (id: string) => notes.get(id)?.score ?? 3;
+    const keep = new Set<string>();
+    const perPara = new Map<number, number>();
+    for (const l of [...picked].sort((a, b) => noteScore(b.id) - noteScore(a.id))) {
+      if (keep.size >= 10 || (perPara.get(l.para) ?? 0) >= 2) continue;
+      keep.add(l.id);
+      perPara.set(l.para, (perPara.get(l.para) ?? 0) + 1);
+    }
+    const layout = picked.filter((l) => keep.has(l.id));
     // 模型沒放照片標記：挑精彩度高的照片，照舊版排法穿插
     const photos = layout.length
       ? layout.map((l) => l.id)
