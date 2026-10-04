@@ -49,6 +49,7 @@
     </header>
 
     <button type="button" id="next-card" class="next-card" hidden></button>
+    <button type="button" id="pin-bar" class="pin-bar" hidden></button>
     <div id="conn" class="conn" hidden>連線中…</div>
     <div id="sos-banner" class="sos-banner" hidden></div>
 
@@ -89,6 +90,12 @@
     <div class="action-grid" id="more-actions"></div>
     <div class="sheet-label">常用問法</div>
     <div class="ask-list" id="more-asks"></div>
+  </dialog>
+
+  <dialog id="pins" class="sheet" aria-label="置頂訊息">
+    <div class="sheet-handle"></div>
+    <div class="sheet-head"><h2>置頂訊息</h2><button class="icon" id="pins-close" aria-label="關閉">✕</button></div>
+    <div class="pin-list" id="pin-list"></div>
   </dialog>
 
   <!-- 面板 -->

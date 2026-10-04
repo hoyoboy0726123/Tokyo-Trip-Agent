@@ -1,4 +1,6 @@
 export interface Env {
+  /** 每次部署不同的版本號（前端用來發現新版） */
+  CF_VERSION?: WorkerVersionMetadata;
   ASSETS: Fetcher;
   AI: Ai;
   ROOM: DurableObjectNamespace;

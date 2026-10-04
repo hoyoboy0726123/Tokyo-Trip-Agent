@@ -4,6 +4,7 @@ const els = {
   login: $("#login"), loginForm: $("#login-form"), loginName: $("#login-name"), loginPassword: $("#login-password"), loginError: $("#login-error"),
   app: $("#app"), messages: $("#messages"), loadMore: $("#load-more"), toLatest: $("#to-latest"), toLatestN: $("#to-latest-n"), conn: $("#conn"),
   dayBadge: $("#day-badge"), todayTitle: $("#today-title"), online: $("#online"), avatars: $("#avatars"), chips: $("#chips"),
+  pinBar: $("#pin-bar"), pins: $("#pins"), pinList: $("#pin-list"),
   nextCard: $("#next-card"), ncToggle: $("#nc-toggle"), chipsToggle: $("#chips-toggle"), tabbar: $("#tabbar"), more: $("#more"), moreActions: $("#more-actions"), moreAsks: $("#more-asks"),
   input: $("#input"), sendForm: $("#send-form"), sendBtn: $("#send-btn"), photoInput: $("#photo-input"),
   attach: $("#attach"), attachImg: $("#attach-img"), attachLoc: $("#attach-loc"), attachClear: $("#attach-clear"),
@@ -54,6 +55,8 @@ const ICONS = {
   help: '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"/>',
   wallet: '<path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/>',
   chev: '<path d="m9 18 6-6-6-6"/>',
+  copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  pushpin: '<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>',
 };
 const svg = (name) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] ?? ""}</svg>`;
 
@@ -180,6 +183,7 @@ function wsSend(obj) {
 function handle(m) {
   switch (m.type) {
     case "hello":
+      checkVersion(m.version);
       S.me = m.me;
       S.aiName = m.aiName;
       S.settings = m.settings;
@@ -291,7 +295,11 @@ function messageNode(msg) {
     const url = `https://www.google.com/maps/search/?api=1&query=${msg.location.lat},${msg.location.lon}`;
     body += `<div class="loc-card">📍 <a href="${url}" target="_blank" rel="noopener">分享了目前位置</a></div>`;
   }
-  if (msg.text) body += isAI ? md(msg.text) : escapeHtml(msg.text).replace(/\n/g, "<br>");
+  // 文字部分包一層，「複製」只拿這段（不含圖片說明）
+  if (msg.text) body += isAI ? `<div class="msg-text">${md(msg.text)}</div>` : `<span class="msg-text">${escapeHtml(msg.text).replace(/\n/g, "<br>")}</span>`;
+  const pinned = S.pinned?.has(msg.id);
+  if (pinned) node.classList.add("pinned");
+  const actions = `<div class="msg-actions"><button type="button" data-act="copy">${svg("copy")}<span>複製</span></button><button type="button" data-act="pin">${svg("pushpin")}<span>${pinned ? "取消置頂" : "置頂"}</span></button></div>`;
   const images = (msg.meta?.images ?? []).filter((im) => typeof im.src === "string" && (im.src.startsWith("/api/img?") || im.src.startsWith("/api/photo/")));
   const webImages = images.some((im) => im.src.startsWith("/api/img?"));
   if (images.length) {
@@ -313,12 +321,13 @@ function messageNode(msg) {
         <span class="ai-time">${timeText(msg.ts)}${provider ? ` · ${provider}` : ""}</span></div>
       <div class="ai-body rich">${body}</div>
       ${(msg.drafts ?? []).map(draftHtml).join("")}
+      ${actions}
     </div>`;
   } else if (isMe) {
-    node.innerHTML = `<div class="bubble-wrap"><div class="bubble rich">${body}</div><div class="meta">${timeText(msg.ts)}</div></div>`;
+    node.innerHTML = `<div class="bubble-wrap"><div class="bubble rich">${body}</div><div class="meta">${timeText(msg.ts)}</div>${actions}</div>`;
   } else {
     node.innerHTML = `<div class="avatar" style="background:${colorFor(msg.author)}">${escapeHtml([...msg.author][0])}</div>
-      <div class="bubble-wrap"><div class="name">${escapeHtml(msg.author)}・${timeText(msg.ts)}</div><div class="bubble rich">${body}</div></div>`;
+      <div class="bubble-wrap"><div class="name">${escapeHtml(msg.author)}・${timeText(msg.ts)}</div><div class="bubble rich">${body}</div>${actions}</div>`;
   }
   node.querySelectorAll("img.photo").forEach((img) => img.addEventListener("click", () => openViewer(img.src)));
   return node;
@@ -340,6 +349,120 @@ function draftHtml(d) {
     <div class="draft-head"><b>${escapeHtml(p.title || "請確認")}</b><span class="draft-no">#${d.id}・${d.status === "pending" ? "還沒寫入" : "已處理"}</span></div>
     <dl>${rows}</dl>${foot}</div>`;
 }
+
+// ---------- 新版自動更新：每次部署版本號都不同，重新連線時比對 ----------
+// 主畫面 App 從背景切回來不會重新載入程式，不處理的話會一直用舊版
+function checkVersion(v) {
+  if (!v) return;
+  if (!S.version) S.version = v;
+  else if (v !== S.version && !S.updateReady) {
+    S.updateReady = true;
+    if (document.hidden) return location.reload();
+    const bar = document.createElement("button");
+    bar.type = "button";
+    bar.className = "update-bar";
+    bar.textContent = "🔄 新版本已推出，點這裡更新";
+    bar.addEventListener("click", () => location.reload());
+    els.conn.after(bar);
+  }
+}
+// 切回 App 時，沒有打到一半的訊息就直接換新版
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && S.updateReady && !els.input.value.trim() && !document.querySelector("dialog[open]")) location.reload();
+});
+
+// ---------- 複製與置頂 ----------
+
+els.messages.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-act]");
+  if (btn) {
+    const msgEl = btn.closest(".msg");
+    if (btn.dataset.act === "copy") copyText(msgEl.querySelector(".msg-text")?.innerText.trim() || "", btn);
+    else action({ action: S.pinned?.has(msgEl.dataset.id) ? "unpin" : "pin", id: msgEl.dataset.id });
+    return;
+  }
+  // 家人的訊息點一下才出現「複製／置頂」，畫面比較乾淨
+  const bubble = e.target.closest(".msg:not(.ai) .bubble");
+  if (bubble && !e.target.closest("a, img")) bubble.closest(".msg").classList.toggle("show-actions");
+});
+
+async function copyText(text, btn) {
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  } catch {
+    // 舊瀏覽器或沒有權限：用隱藏的文字框複製
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;opacity:0";
+    document.body.append(ta);
+    ta.select();
+    try {
+      ok = document.execCommand("copy");
+    } catch {}
+    ta.remove();
+  }
+  const label = btn?.querySelector("span") ?? btn;
+  if (!label) return;
+  const old = label.textContent;
+  label.textContent = ok ? "已複製 ✓" : "複製失敗";
+  setTimeout(() => (label.textContent = old), 1500);
+}
+
+function plainExcerpt(msg) {
+  const t = String(msg.text || "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/[#*_`>|]/g, "").replace(/\s+/g, " ").trim();
+  return t.slice(0, 80) || (msg.photo ? "（照片）" : msg.location ? "（位置）" : "");
+}
+
+/** 置頂：上方一條細列（不佔聊天空間），點開看全部；訊息上的按鈕跟著更新 */
+function renderPins(pins = []) {
+  S.pins = pins;
+  S.pinned = new Set(pins.map((p) => p.message.id));
+  els.messages.querySelectorAll(".msg[data-id]").forEach((n) => {
+    const on = S.pinned.has(n.dataset.id);
+    n.classList.toggle("pinned", on);
+    const label = n.querySelector('[data-act="pin"] span');
+    if (label) label.textContent = on ? "取消置頂" : "置頂";
+  });
+  els.pinBar.hidden = !pins.length;
+  if (pins.length) els.pinBar.innerHTML = `${svg("pushpin")}<b>置頂 ${pins.length}</b><span>${escapeHtml(plainExcerpt(pins[0].message))}</span>${svg("chev")}`;
+  if (els.pins.open) renderPinList();
+}
+
+function renderPinList() {
+  const pins = S.pins ?? [];
+  els.pinList.innerHTML = pins.length ? "" : `<div class="small muted">目前沒有置頂訊息</div>`;
+  for (const p of pins) {
+    const item = document.createElement("div");
+    item.className = "pin-item";
+    item.innerHTML = `<div class="pin-meta">${svg("pushpin")}${escapeHtml(p.by)} 置頂・${timeText(p.ts)}</div>`;
+    const node = messageNode(p.message);
+    node.querySelector(".msg-actions")?.remove();
+    item.append(node);
+    const inChat = els.messages.querySelector(`.msg[data-id="${p.message.id}"]`);
+    item.insertAdjacentHTML(
+      "beforeend",
+      `<div class="pin-actions"><button type="button" data-pa="copy"><span>複製</span></button>${inChat ? `<button type="button" data-pa="jump">跳到原訊息</button>` : ""}<button type="button" data-pa="unpin">取消置頂</button></div>`,
+    );
+    item.querySelector('[data-pa="copy"]').addEventListener("click", (e) => copyText(node.querySelector(".msg-text")?.innerText.trim() || "", e.currentTarget));
+    item.querySelector('[data-pa="unpin"]').addEventListener("click", () => action({ action: "unpin", id: p.message.id }));
+    item.querySelector('[data-pa="jump"]')?.addEventListener("click", () => {
+      els.pins.close();
+      inChat.scrollIntoView({ block: "center", behavior: "smooth" });
+      inChat.classList.remove("flash");
+      requestAnimationFrame(() => inChat.classList.add("flash"));
+    });
+    els.pinList.append(item);
+  }
+}
+
+els.pinBar.addEventListener("click", () => {
+  renderPinList();
+  els.pins.showModal();
+});
+$("#pins-close").addEventListener("click", () => els.pins.close());
+els.pins.addEventListener("click", (e) => e.target === els.pins && els.pins.close());
 
 els.messages.addEventListener("click", (e) => {
   const b = e.target.closest("[data-draft-act]");
@@ -572,6 +695,7 @@ function aiStart(m) {
     const node = messageNode({ id: m.id, ts: Date.now(), author: S.aiName, role: "assistant", text: "", meta: null });
     node.querySelector(".ai-body").innerHTML = TYPING;
     node.dataset.live = "1";
+    node.querySelector(".msg-actions")?.remove(); // 還在打字、還沒存檔的回答不能複製或置頂
     const sep = daySeparator(Date.now());
     if (sep) els.messages.appendChild(sep);
     els.messages.appendChild(node);
@@ -868,6 +992,7 @@ function stopAutoLocation() {
 
 function setState(state) {
   S.state = state;
+  renderPins(state.pins);
   // 常用句存一份在手機，沒網路也能打開、念出來
   if (state.documents) {
     try {

@@ -24,5 +24,6 @@
     "WORKERS_AI_MODEL": "@cf/google/gemma-4-26b-a4b-it",
     "DEFAULT_PROVIDER": "gemini"
   },
+  "version_metadata": { "binding": "CF_VERSION" },
   "observability": { "enabled": true }
 }

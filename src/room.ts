@@ -11,6 +11,7 @@ import type { Env, Part, Provider, SessionUser, Turn } from "./types";
 
 const HISTORY_WINDOW = 24; // 每次帶給模型的最近訊息數（更早的靠自動回想找回，省 TPM）
 const HISTORY_CHARS = 600; // 每則歷史訊息最多帶多少字
+const PIN_LIMIT = 20; // 置頂訊息上限（每次狀態更新都會帶完整內容，不宜太多）
 const MAX_STEPS = 8; // 單次回答最多工具回合（含系統提醒／代為執行）
 const FOREGROUND_MAX_WAIT = 10_000; // 回答問題時，Gemini 額度滿最多等幾毫秒，超過就改用備援
 const MEMORY_EVERY = 4; // 每 4 則新的成員訊息自動整理一次長期記憶
@@ -76,6 +77,11 @@ function requiredTool(text: string, used: string[], hasPhoto: boolean): string |
 
 function expenseBrief(r: Record<string, SqlStorageValue>) {
   return { id: r.id as number, date: r.date as string, description: r.description as string, amount: r.amount as number, currency: r.currency as string, payer: r.payer as string };
+}
+
+/** 模型偶爾學對話紀錄的格式，回答開頭多一個「［爸爸］」，存檔前拿掉 */
+function stripSpeakerTag(text: string): string {
+  return text.replace(/^\s*［[^］\n]{1,16}］\s*/, "");
 }
 
 /** 分享連結用的隨機碼（24 個網址安全字元，猜不到） */
@@ -161,6 +167,8 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     `);
     // v6：日記加上每天的標題
     if (!this.sql.exec("PRAGMA table_info(diaries)").toArray().some((c) => c.name === "title")) this.sql.exec("ALTER TABLE diaries ADD COLUMN title TEXT");
+    // v7：置頂訊息（全家共用，等一下還要再看的資訊不會被洗掉）
+    this.sql.exec("CREATE TABLE IF NOT EXISTS pins (message_id TEXT PRIMARY KEY, ts INTEGER, by TEXT)");
     if (!this.setting("checklist_seeded")) {
       for (const c of DEFAULT_CHECKLIST) {
         this.sql.exec("INSERT INTO checklist (list, item, for_whom, author, ts) VALUES (?, ?, '', '預設', ?)", c.list, c.item, Date.now());
@@ -319,6 +327,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
   private sendHello(ws: WebSocket, user: SessionUser) {
     this.send(ws, {
       type: "hello",
+      version: this.env.CF_VERSION?.id ?? "",
       me: user,
       aiName: AI_NAME,
       settings: this.settings(),
@@ -487,6 +496,18 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
         if (!user.admin) return reply(false, "只有管理員可以使用");
         await this.writeDiary(jstNow().date);
         break;
+      case "pin": {
+        const id = String(msg.id ?? "");
+        if (!this.sql.exec("SELECT 1 FROM messages WHERE id = ?", id).toArray().length) return reply(false, "找不到這則訊息");
+        if ((this.sql.exec("SELECT COUNT(*) AS n FROM pins").one().n as number) >= PIN_LIMIT) return reply(false, `置頂最多 ${PIN_LIMIT} 則，請先取消不需要的`);
+        this.sql.exec("INSERT OR IGNORE INTO pins VALUES (?, ?, ?)", id, Date.now(), user.name);
+        this.broadcastState();
+        break;
+      }
+      case "unpin":
+        this.sql.exec("DELETE FROM pins WHERE message_id = ?", String(msg.id ?? ""));
+        this.broadcastState();
+        break;
       case "diary_rewrite": {
         if (!user.admin) return reply(false, "只有管理員可以重寫日記");
         const date = String(msg.date ?? "");
@@ -556,6 +577,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
         if (msg.chat) {
           this.sql.exec("DELETE FROM messages");
           this.sql.exec("DELETE FROM drafts");
+          this.sql.exec("DELETE FROM pins");
           this.sql.exec("DELETE FROM photos");
           this.sql.exec("DELETE FROM locations");
           this.sql.exec("DELETE FROM translations");
@@ -1239,6 +1261,11 @@ ${transcript || "（今天群組沒什麼對話）"}`;
       reminders: this.reminderList(),
       documents: this.documentFind().map((d) => ({ id: d.id, title: d.title, note: d.note, author: d.author, ts: d.ts, photo: `/api/photo/${d.photo_id}` })),
       diaries: this.sql.exec("SELECT date, ts, title, text, photo_ids FROM diaries ORDER BY date DESC").toArray(),
+      // 置頂訊息附完整內容：訊息再舊、畫面上沒載入也看得到
+      pins: this.sql
+        .exec<MessageRow & { pin_ts: number; pin_by: string }>("SELECT m.*, p.ts AS pin_ts, p.by AS pin_by FROM pins p JOIN messages m ON m.id = p.message_id ORDER BY p.ts DESC")
+        .toArray()
+        .map((r) => ({ ts: r.pin_ts, by: r.pin_by, message: this.publicMessage(r) })),
       locations: this.memberLocation(),
       trip: {
         title: TRIP.title, startDate: TRIP.startDate, endDate: TRIP.endDate, accommodation: TRIP.accommodation.name,
@@ -1371,7 +1398,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 要求「幾點提醒」→ create_reminder（時間用東京時間 YYYY-MM-DD HH:mm）。
 - 傳照片說要「存起來／存成票券」→ save_document；問「給我看○○的票／訂位」→ find_documents。
 - 有人傳「🆘」走散求助：先安撫，用 get_member_locations 看大家在哪，建議就近約在明顯地標或車站剪票口集合，提醒可找工作人員幫忙、緊急打 110。
-- 有人說「我付了／花了…」→ 用 add_expense 產生記帳卡片；問「花多少、怎麼分」→ expense_summary。
+- 有人說「我付了／花了…」→ 用 add_expense 產生記帳卡片；問「花多少、怎麼分」→ expense_summary。只有成員說付了、花了、要記帳，或傳收據時才記帳；問「怎麼儲值、怎麼買票、要多少錢」是在問做法或價格，直接回答，不要問金額、不要產生記帳卡片。
 - 成員做了決定、說了偏好、訂了東西 → 主動用 remember 記下來；行程要改就用 update_itinerary 產生修改卡片。只有 remember 成功後才能說「已記住」；沒有呼叫工具就不要聲稱已記住（系統也會在背景定期自動整理記憶）。
 - 收到照片：辨識菜單、商品、看板、車票並翻譯說明；商品可以查價比價並試算免稅（tax_free_check）。
 - 安全第一：遇到緊急狀況提供日本緊急電話（警察 110、救護/消防 119）與最近的醫院資訊。`;
@@ -1535,7 +1562,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
         }
         if (!finalText.trim()) finalText = images.length ? "幫你找到這些圖片 👇（網路圖片，僅供參考）" : "嗯…我沒有想到好的回答，可以換個方式問我嗎？";
         const row = this.insertMessage({
-          id, author: AI_NAME, role: "assistant", text: fixMapLinks(finalText), photo_id: null, lat: null, lon: null,
+          id, author: AI_NAME, role: "assistant", text: fixMapLinks(stripSpeakerTag(finalText)), photo_id: null, lat: null, lon: null,
           meta: JSON.stringify({
             provider: provider.id, model: provider.model, tools: [...new Set(toolsUsed)].map(toolLabel),
             ...(images.length ? { images } : {}),
