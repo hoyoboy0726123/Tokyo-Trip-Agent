@@ -60,6 +60,9 @@ const MEMORY_EVERY = 4; // 每 4 則新的成員訊息自動整理一次長期�
 const RECALL_LIMIT = 8; // 從較舊的聊天中自動找回的相關訊息數
 const AI_NAME = "旅伴 AI";
 
+/** 票券保管箱的一張票券（folder＝所在資料夾的完整路徑，最外層是空字串） */
+type DocRow = { id: number; title: string; note: string; photo_id: string; author: string; ts: number; folder_id: number | null; folder: string };
+
 type MessageRow = {
   id: string;
   ts: number;
@@ -222,6 +225,9 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     if (!this.sql.exec("PRAGMA table_info(diaries)").toArray().some((c) => c.name === "title")) this.sql.exec("ALTER TABLE diaries ADD COLUMN title TEXT");
     // v7：置頂訊息（全家共用，等一下還要再看的資訊不會被洗掉）
     this.sql.exec("CREATE TABLE IF NOT EXISTS pins (message_id TEXT PRIMARY KEY, ts INTEGER, by TEXT)");
+    // 票券保管箱的資料夾（可以一層層放）；票券的 folder_id 是 NULL＝放在最外層
+    this.sql.exec("CREATE TABLE IF NOT EXISTS doc_folders (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, parent_id INTEGER, ts INTEGER, author TEXT)");
+    if (!this.sql.exec("PRAGMA table_info(documents)").toArray().some((c) => c.name === "folder_id")) this.sql.exec("ALTER TABLE documents ADD COLUMN folder_id INTEGER");
     // 日記挑照片用：AI 看過每張照片的說明
     this.sql.exec("CREATE TABLE IF NOT EXISTS photo_notes (photo_id TEXT PRIMARY KEY, kind TEXT, score INTEGER, note TEXT, ts INTEGER, v INTEGER)");
     if (!this.sql.exec("PRAGMA table_info(photo_notes)").toArray().some((c) => c.name === "v")) this.sql.exec("ALTER TABLE photo_notes ADD COLUMN v INTEGER");
@@ -545,12 +551,57 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       // ---- 票券 ----
       case "document_save":
         if (typeof msg.photoId !== "string") return reply(false, "請先選擇照片");
-        this.documentSave(String(msg.title || "票券").slice(0, 80), String(msg.note ?? "").slice(0, 300), msg.photoId, user.name);
+        this.documentSave(String(msg.title || "票券").slice(0, 80), String(msg.note ?? "").slice(0, 300), msg.photoId, user.name, this.folderId(msg.folder));
         break;
       case "document_delete":
         this.sql.exec("DELETE FROM documents WHERE id = ?", Number(msg.id));
         this.broadcastState();
         break;
+      // ---- 票券資料夾：全家共用，誰都可以整理 ----
+      case "document_move": {
+        const folder = this.folderId(msg.folder);
+        if (msg.folder != null && folder == null) return reply(false, "找不到這個資料夾，可能剛被刪掉了");
+        this.sql.exec("UPDATE documents SET folder_id = ? WHERE id = ?", folder, Number(msg.id));
+        this.broadcastState();
+        break;
+      }
+      case "folder_create": {
+        const name = String(msg.name ?? "").trim().slice(0, 40);
+        if (!name) return reply(false, "請輸入資料夾名稱");
+        const parent = this.folderId(msg.parent);
+        if (this.sql.exec("SELECT 1 FROM doc_folders WHERE name = ? AND parent_id IS ?", name, parent).toArray().length) return reply(false, "這裡已經有同名的資料夾");
+        this.sql.exec("INSERT INTO doc_folders (name, parent_id, ts, author) VALUES (?, ?, ?, ?)", name, parent, Date.now(), user.name);
+        this.broadcastState();
+        break;
+      }
+      case "folder_rename": {
+        const id = this.folderId(msg.id);
+        const name = String(msg.name ?? "").trim().slice(0, 40);
+        if (id == null || !name) return reply(false, "找不到資料夾或名稱是空的");
+        this.sql.exec("UPDATE doc_folders SET name = ? WHERE id = ?", name, id);
+        this.broadcastState();
+        break;
+      }
+      case "folder_move": {
+        const id = this.folderId(msg.id);
+        const parent = this.folderId(msg.parent);
+        if (id == null) return reply(false, "找不到這個資料夾");
+        if (parent != null && this.folderLineage(parent).includes(id)) return reply(false, "不能把資料夾搬進它自己裡面");
+        this.sql.exec("UPDATE doc_folders SET parent_id = ? WHERE id = ?", parent, id);
+        this.broadcastState();
+        break;
+      }
+      // 刪資料夾不刪票券：裡面的票券和子資料夾都移到上一層
+      case "folder_delete": {
+        const id = this.folderId(msg.id);
+        if (id == null) return reply(false, "找不到這個資料夾");
+        const up = this.sql.exec("SELECT parent_id FROM doc_folders WHERE id = ?", id).one().parent_id ?? null;
+        this.sql.exec("UPDATE documents SET folder_id = ? WHERE folder_id = ?", up, id);
+        this.sql.exec("UPDATE doc_folders SET parent_id = ? WHERE parent_id = ?", up, id);
+        this.sql.exec("DELETE FROM doc_folders WHERE id = ?", id);
+        this.broadcastState();
+        break;
+      }
       // ---- 手動觸發早報／日記（管理員，出發前測試用） ----
       case "brief_now":
         if (!user.admin) return reply(false, "只有管理員可以使用");
@@ -702,6 +753,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
           this.sql.exec("DELETE FROM checklist");
           this.sql.exec("DELETE FROM reminders");
           this.sql.exec("DELETE FROM documents");
+          this.sql.exec("DELETE FROM doc_folders");
           this.sql.exec("DELETE FROM diaries");
           cleared.push("清單、提醒、票券、日記");
         }
@@ -1090,20 +1142,68 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
 
   // ---- 票券保管箱 ----
 
-  documentSave(title: string, note: string, photoId: string, author: string) {
+  documentSave(title: string, note: string, photoId: string, author: string, folder: number | null = null) {
     const row = this.sql
-      .exec("INSERT INTO documents (ts, author, title, note, photo_id) VALUES (?, ?, ?, ?, ?) RETURNING id, title", Date.now(), author, title, note, photoId)
+      .exec("INSERT INTO documents (ts, author, title, note, photo_id, folder_id) VALUES (?, ?, ?, ?, ?, ?) RETURNING id, title", Date.now(), author, title, note, photoId, folder)
       .one();
     this.broadcastState();
-    return { saved: row, note: "已存進 下方「工具箱」→ 票券保管箱，打開過一次之後沒網路也看得到" };
+    const where = folder == null ? "" : `的「${this.folderPaths().get(folder) ?? ""}」資料夾`;
+    return { saved: row, note: `已存進 下方「工具箱」→ 票券保管箱${where}，打開過一次之後沒網路也看得到` };
   }
 
+  /** 關鍵字比對票券名稱、備註和所在資料夾（例如「機票」可以找出機票資料夾裡的全部） */
   documentFind(keyword?: string) {
-    const words = String(keyword ?? "").split(/\s+/).filter(Boolean).slice(0, 3);
-    const rows = words.length
-      ? this.sql.exec(`SELECT * FROM documents WHERE ${words.map(() => "(title LIKE ? OR note LIKE ?)").join(" AND ")} ORDER BY ts DESC`, ...words.flatMap((w) => [`%${w}%`, `%${w}%`])).toArray()
-      : this.sql.exec("SELECT * FROM documents ORDER BY ts DESC").toArray();
-    return rows as unknown as { id: number; title: string; note: string; photo_id: string; author: string; ts: number }[];
+    const words = String(keyword ?? "").toLowerCase().split(/\s+/).filter(Boolean).slice(0, 3);
+    const paths = this.folderPaths();
+    const rows = (this.sql.exec("SELECT * FROM documents ORDER BY ts DESC").toArray() as unknown as Omit<DocRow, "folder">[]).map((d) => ({
+      ...d,
+      folder: d.folder_id == null ? "" : paths.get(Number(d.folder_id)) ?? "",
+    }));
+    return words.length ? rows.filter((d) => words.every((w) => `${d.title} ${d.note} ${d.folder}`.toLowerCase().includes(w))) : rows;
+  }
+
+  /** AI 存票券時指定的資料夾：用名稱找（哪一層都可以），找不到就在最外層建一個 */
+  documentFolder(name: string, author: string): number | null {
+    const n = name.trim().slice(0, 40);
+    if (!n) return null;
+    const hit = this.sql.exec("SELECT id FROM doc_folders WHERE name = ? ORDER BY parent_id IS NOT NULL, id LIMIT 1", n).toArray()[0];
+    if (hit) return Number(hit.id);
+    const id = Number(this.sql.exec("INSERT INTO doc_folders (name, parent_id, ts, author) VALUES (?, NULL, ?, ?) RETURNING id", n, Date.now(), author).one().id);
+    this.broadcastState();
+    return id;
+  }
+
+  /** 前端傳來的資料夾：沒指定或不存在＝最外層（null） */
+  private folderId(v: unknown): number | null {
+    const id = Number(v);
+    if (v == null || v === "" || !Number.isInteger(id)) return null;
+    return this.sql.exec("SELECT 1 FROM doc_folders WHERE id = ?", id).toArray().length ? id : null;
+  }
+
+  /** 從這個資料夾一路往上到最外層（含自己），用來擋「把資料夾搬進自己裡面」 */
+  private folderLineage(id: number): number[] {
+    const out: number[] = [];
+    let cur: number | null = id;
+    while (cur != null && !out.includes(cur)) {
+      out.push(cur);
+      const up: unknown = this.sql.exec("SELECT parent_id FROM doc_folders WHERE id = ?", cur).toArray()[0]?.parent_id;
+      cur = up == null ? null : Number(up);
+    }
+    return out;
+  }
+
+  /** 每個資料夾的完整路徑，例如「機票／回程」 */
+  private folderPaths(): Map<number, string> {
+    const rows = this.sql.exec("SELECT id, name, parent_id FROM doc_folders").toArray();
+    const byId = new Map(rows.map((r) => [Number(r.id), r]));
+    const path = (id: number, seen: Set<number>): string => {
+      const r = byId.get(id);
+      if (!r || seen.has(id)) return "";
+      seen.add(id);
+      const up = r.parent_id == null ? "" : path(Number(r.parent_id), seen);
+      return up ? `${up}／${r.name}` : String(r.name);
+    };
+    return new Map(rows.map((r) => [Number(r.id), path(Number(r.id), new Set())]));
   }
 
   // ================= 排程：提醒、每日早報、旅遊日記、災害警報 =================
@@ -1509,7 +1609,8 @@ ${transcript || "（今天群組沒什麼對話）"}`;
       phrases: this.sql.exec("SELECT id, category, zh, ja, kana, author FROM phrases ORDER BY id").toArray(),
       checklist: this.checklistGet(),
       reminders: this.reminderList(),
-      documents: this.documentFind().map((d) => ({ id: d.id, title: d.title, note: d.note, author: d.author, ts: d.ts, photo: `/api/photo/${d.photo_id}` })),
+      documents: this.documentFind().map((d) => ({ id: d.id, title: d.title, note: d.note, author: d.author, ts: d.ts, photo: `/api/photo/${d.photo_id}`, folder: d.folder_id ?? null })),
+      docFolders: this.sql.exec("SELECT id, name, parent_id AS parent FROM doc_folders ORDER BY id").toArray(),
       diaries: this.sql.exec("SELECT date, ts, title, text, photo_ids, edited_by, edited_at FROM diaries ORDER BY date DESC").toArray(),
       // 置頂訊息附完整內容：訊息再舊、畫面上沒載入也看得到
       pins: this.sql
@@ -1647,7 +1748,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 收到收據照片（或說「記帳這張收據」）：讀出店名、日期、含稅總金額、幣別與主要品項，用 add_expense 產生記帳卡片（description 寫「店名：品項」），付款人預設是發問者。幣別要看清楚：日本收據是 JPY（¥、円、令和），台灣收據是 TWD（NT$、民國年、統一發票）。民國年要加 1911（113 年＝2024 年），令和 N 年＝2018+N 年。若是免稅店或金額可能達免稅門檻，順便提醒。
 - 只有成員明確說「加入／加到清單」時才用 add_checklist_items。只是說想買、要帶、問推薦，都不可以自動加入清單；只有成員提到想買或要帶東西時，才在回答最後問一句要不要加進清單，其他話題（例如記帳、問路）不要問。買到了、帶了、辦好了 → update_checklist_item；問清單 → get_checklist。
 - 要求「幾點提醒」→ create_reminder（時間用東京時間 YYYY-MM-DD HH:mm）。
-- 傳照片說要「存起來／存成票券」→ save_document；問「給我看○○的票／訂位」→ find_documents。
+- 傳照片說要「存起來／存成票券」→ save_document（說要放哪個資料夾，例如「存到機票」，就填 folder）；問「給我看○○的票／訂位」→ find_documents（關鍵字也可以是資料夾名稱）。
 - 有人傳「🆘」走散求助：先安撫，用 get_member_locations 看大家在哪，建議就近約在明顯地標或車站剪票口集合，提醒可找工作人員幫忙、緊急打 110。
 - 有人說「我付了／花了…」→ 用 add_expense 產生記帳卡片；問「花多少、怎麼分」→ expense_summary。只有成員說付了、花了、要記帳，或傳收據時才記帳；問「怎麼儲值、怎麼買票、要多少錢」是在問做法或價格，直接回答，不要問金額、不要產生記帳卡片。
 - 成員做了決定、說了偏好、訂了東西 → 主動用 remember 記下來；行程要改就用 update_itinerary 產生修改卡片。只有 remember 成功後才能說「已記住」；沒有呼叫工具就不要聲稱已記住（系統也會在背景定期自動整理記憶）。

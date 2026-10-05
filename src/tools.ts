@@ -24,8 +24,9 @@ export interface RoomApi {
   expenseGet(id: number): ExpenseBrief | null;
   /** 品項關鍵字找帳（空字串＝最近的幾筆） */
   expenseFind(keyword: string): ExpenseBrief[];
-  documentSave(title: string, note: string, photoId: string, author: string): unknown;
-  documentFind(keyword?: string): { id: number; title: string; note: string; photo_id: string; author: string; ts: number }[];
+  documentSave(title: string, note: string, photoId: string, author: string, folder?: number | null): unknown;
+  documentFind(keyword?: string): { id: number; title: string; note: string; photo_id: string; author: string; ts: number; folder: string }[];
+  documentFolder(name: string, author: string): number | null;
   cacheGet(key: string, maxAgeMs: number): string | null;
   cacheSet(key: string, value: string): void;
 }
@@ -1169,13 +1170,15 @@ export const TOOLS: Tool[] = [
         properties: {
           title: { type: "string", description: "名稱，例如「藤子博物館門票 10/4 11:00」" },
           note: { type: "string", description: "補充說明，可留空" },
+          folder: { type: "string", description: "放進哪個資料夾（例如「機票」「門票」），成員沒指定就不要填（放最外層）；沒有這個資料夾會自動建立" },
         },
         required: ["title"],
       },
     },
     async run(args, { room, author, photoId }) {
       if (!photoId) return { error: "這則訊息沒有附照片，請附上票券照片再說要存起來" };
-      return room.documentSave(String(args.title).slice(0, 80), String(args.note ?? "").slice(0, 300), photoId, author);
+      const folder = args.folder ? room.documentFolder(String(args.folder), author) : null;
+      return room.documentSave(String(args.title).slice(0, 80), String(args.note ?? "").slice(0, 300), photoId, author, folder);
     },
   },
   {
@@ -1183,13 +1186,13 @@ export const TOOLS: Tool[] = [
     decl: {
       name: "find_documents",
       description: "從票券保管箱找出票券或憑證，照片會顯示在回答下方。例如「給我看藤子博物館的票」。",
-      parameters: { type: "object", properties: { keyword: { type: "string", description: "關鍵字，留空=全部" } } },
+      parameters: { type: "object", properties: { keyword: { type: "string", description: "關鍵字（票券名稱、備註或資料夾名稱），留空=全部" } } },
     },
     async run(args, { room, attachImage }) {
       const docs = room.documentFind(args.keyword);
       for (const d of docs.slice(0, 6)) attachImage?.({ src: `/api/photo/${d.photo_id}`, caption: d.note, label: d.title, source: `${d.author} 存的` });
       if (!docs.length) return { found: 0, note: "保管箱裡沒有符合的票券；可以在 下方「工具箱」→ 票券保管箱 上傳，或傳照片並說「存成票券」" };
-      return { found: docs.length, documents: docs.map((d) => ({ id: d.id, title: d.title, note: d.note, by: d.author })), note: "票券照片已顯示在回答下方" };
+      return { found: docs.length, documents: docs.map((d) => ({ id: d.id, title: d.title, note: d.note, by: d.author, folder: d.folder || "最外層" })), note: "票券照片已顯示在回答下方" };
     },
   },
 ];

@@ -1045,6 +1045,7 @@ function setState(state) {
   if (state.documents) {
     try {
       localStorage.setItem("tta-docs", JSON.stringify(state.documents));
+      localStorage.setItem("tta-doc-folders", JSON.stringify(state.docFolders ?? []));
     } catch {}
   }
   if (state.phrases) {
@@ -1682,39 +1683,101 @@ function renderChecklistPanel(st, b) {
   });
 }
 
-// ---------- 🎫 票券保管箱 ----------
+// ---------- 🎫 票券保管箱（可以分資料夾，沒放進資料夾的在最外層） ----------
 
 function renderTicketsPanel(st, b) {
   els.panelTitle.textContent = "🎫 票券保管箱";
-  let docs = st?.documents;
-  if (!docs) {
-    try {
-      docs = JSON.parse(localStorage.getItem("tta-docs") || "[]");
-    } catch {
-      docs = [];
+  const docs = st?.documents ?? cachedJson("tta-docs") ?? [];
+  const folders = st?.docFolders ?? cachedJson("tta-doc-folders") ?? [];
+  const byId = new Map(folders.map((f) => [f.id, f]));
+  // 正在看的資料夾被別人刪掉了：回最外層
+  if (S.docFolder != null && !byId.has(S.docFolder)) S.docFolder = null;
+  const here = S.docFolder ?? null;
+  const trail = [];
+  for (let f = byId.get(here); f && !trail.includes(f); f = byId.get(f.parent)) trail.unshift(f);
+  const hereName = trail.at(-1)?.name ?? "";
+  const byName = (a, c) => a.name.localeCompare(c.name, "zh-Hant");
+  const subs = folders.filter((f) => (f.parent ?? null) === here).sort(byName);
+  const items = docs.filter((d) => (d.folder ?? null) === here);
+  // 資料夾自己加上裡面所有子資料夾
+  const subtree = (id) => {
+    const ids = new Set([id]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const f of folders) if (ids.has(f.parent) && !ids.has(f.id)) (ids.add(f.id), (grew = true));
     }
-  }
+    return ids;
+  };
+  const count = (id) => {
+    const ids = subtree(id);
+    return docs.filter((d) => ids.has(d.folder)).length;
+  };
   b.innerHTML = `
     ${backToHub()}
-    <p class="small muted">門票、訂位確認、QR Code 存在這裡，全家都看得到；<b>打開過一次之後，沒網路也能看</b>。也可以在聊天傳照片說「存成票券」。</p>
-    ${st ? `<div class="card"><form class="form" id="doc-form">
+    <p class="small muted">門票、訂位確認、QR Code 存在這裡，全家都看得到；<b>打開過一次之後，沒網路也能看</b>。可以建資料夾分類，沒放進資料夾的就在最外層。也可以在聊天傳照片說「存成票券」。</p>
+    <nav class="doc-crumbs"><button type="button" data-go="">🎫 全部</button>${trail.map((f) => `<span>›</span><button type="button" data-go="${f.id}">📁 ${escapeHtml(f.name)}</button>`).join("")}</nav>
+    ${st ? `<div class="doc-tools">
+      <button type="button" class="btn small" id="doc-add">${S.docUpload ? "收起上傳" : "＋ 上傳票券"}</button>
+      <button type="button" class="btn small" id="folder-new">＋ 新資料夾</button>
+      ${here != null ? `<button type="button" class="btn small" id="folder-rename">改名</button><button type="button" class="btn small" id="folder-move">移動資料夾</button><button type="button" class="btn danger small" id="folder-del">刪除資料夾</button>` : ""}
+    </div>
+    ${S.docUpload ? `<div class="card"><form class="form" id="doc-form">
+      <div class="small muted">上傳到：${here != null ? `📁 ${escapeHtml(hereName)}` : "最外層"}</div>
       <input name="title" placeholder="名稱，例如：藤子博物館門票 10/4 11:00" required />
       <input name="note" placeholder="備註（可留空）" />
       <input name="photo" type="file" accept="image/*" required />
       <button class="btn primary-sm" id="doc-save">上傳</button>
-    </form></div>` : ""}
-    <div class="doc-grid">${docs.length
-      ? docs.map((d) => `<div class="card doc" data-src="${escapeHtml(d.photo)}">
+    </form></div>` : ""}` : ""}
+    <div class="doc-grid">
+      ${subs.map((f) => `<button type="button" class="card doc-folder" data-go="${f.id}"><span class="doc-folder-icon">📁</span><b>${escapeHtml(f.name)}</b><span class="small muted">${count(f.id)} 張</span></button>`).join("")}
+      ${items.map((d) => `<div class="card doc">
           <img src="${escapeHtml(d.photo)}" loading="lazy" alt="" />
           <b>${escapeHtml(d.title)}</b>${d.note ? `<div class="small muted">${escapeHtml(d.note)}</div>` : ""}
-          <div class="row between small muted"><span>${escapeHtml(d.author)}</span>${st ? `<button class="btn danger small" data-del="${d.id}">刪除</button>` : ""}</div>
-        </div>`).join("")
-      : `<div class="card small muted">還沒有票券</div>`}</div>`;
+          <div class="small muted">${escapeHtml(d.author)}</div>
+          ${st ? `<div class="doc-btns"><button type="button" class="btn small" data-move="${d.id}">移動</button><button type="button" class="btn danger small" data-del="${d.id}">刪除</button></div>` : ""}
+        </div>`).join("")}
+      ${subs.length || items.length ? "" : `<div class="card small muted">${here != null ? "這個資料夾是空的" : "還沒有票券"}</div>`}
+    </div>`;
   bindBack(b);
-  // 預先載入所有票券照片，讓離線快取有東西可看
+  // 預先載入所有票券照片（包含資料夾裡的），讓離線快取有東西可看
   docs.forEach((d) => fetch(d.photo).catch(() => {}));
+  b.querySelectorAll("[data-go]").forEach((x) =>
+    x.addEventListener("click", () => {
+      S.docFolder = x.dataset.go === "" ? null : Number(x.dataset.go);
+      renderPanel();
+    }),
+  );
   b.querySelectorAll(".doc img").forEach((img) => img.addEventListener("click", () => openViewer(img.src)));
   b.querySelectorAll("[data-del]").forEach((x) => x.addEventListener("click", () => confirm("刪除這張票券？") && action({ action: "document_delete", id: Number(x.dataset.del) })));
+  b.querySelectorAll("[data-move]").forEach((x) =>
+    x.addEventListener("click", async () => {
+      const d = docs.find((y) => y.id === Number(x.dataset.move));
+      const to = await pickFolder(d.title, folders, d.folder ?? null);
+      if (to !== undefined) action({ action: "document_move", id: d.id, folder: to });
+    }),
+  );
+  $("#doc-add", b)?.addEventListener("click", () => {
+    S.docUpload = !S.docUpload;
+    renderPanel();
+  });
+  $("#folder-new", b)?.addEventListener("click", () => {
+    const name = prompt(here != null ? `在「${hereName}」裡新增資料夾，名稱：` : "新資料夾名稱：")?.trim();
+    if (name) action({ action: "folder_create", name, parent: here });
+  });
+  $("#folder-rename", b)?.addEventListener("click", () => {
+    const name = prompt("資料夾新名稱：", hereName)?.trim();
+    if (name && name !== hereName) action({ action: "folder_rename", id: here, name });
+  });
+  $("#folder-move", b)?.addEventListener("click", async () => {
+    // 不能搬進自己或自己裡面的資料夾
+    const to = await pickFolder(`📁 ${hereName}`, folders, byId.get(here)?.parent ?? null, subtree(here));
+    if (to !== undefined) action({ action: "folder_move", id: here, parent: to });
+  });
+  $("#folder-del", b)?.addEventListener("click", () => {
+    if (!confirm(`刪除「${hereName}」資料夾？裡面的票券和資料夾會移到上一層，不會被刪掉。`)) return;
+    S.docFolder = byId.get(here)?.parent ?? null;
+    action({ action: "folder_delete", id: here });
+  });
   b.querySelector("#doc-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -1728,13 +1791,60 @@ function renderTicketsPanel(st, b) {
       const res = await fetch("/api/photo", { method: "POST", headers: { "content-type": blob.type }, body: blob });
       if (!res.ok) throw new Error(`上傳失敗（${res.status}）`);
       const { id } = await res.json();
-      action({ action: "document_save", title: f.get("title"), note: f.get("note"), photoId: id });
+      S.docUpload = false;
+      action({ action: "document_save", title: f.get("title"), note: f.get("note"), photoId: id, folder: here });
     } catch (err) {
       alert(err.message);
       btn.disabled = false;
       btn.textContent = "上傳";
     }
   });
+}
+
+/** 選資料夾的小視窗：回傳資料夾 id、null＝最外層、undefined＝取消；banned＝不能選的（自己和裡面的資料夾） */
+function pickFolder(what, folders, current, banned = new Set()) {
+  return new Promise((resolve) => {
+    const rows = [];
+    const walk = (parent, depth) => {
+      for (const f of folders.filter((x) => (x.parent ?? null) === parent).sort((a, c) => a.name.localeCompare(c.name, "zh-Hant"))) {
+        if (banned.has(f.id)) continue;
+        rows.push({ ...f, depth });
+        walk(f.id, depth + 1);
+      }
+    };
+    walk(null, 0);
+    const opt = (id, label, depth) =>
+      `<button type="button" data-to="${id ?? ""}" style="padding-left:${14 + depth * 20}px" ${id === current ? "disabled" : ""}>${label}${id === current ? "（現在在這裡）" : ""}</button>`;
+    const dlg = document.createElement("dialog");
+    dlg.className = "sheet";
+    dlg.innerHTML = `<div class="sheet-handle"></div>
+      <div class="sheet-head"><h2>移到哪裡？</h2><button type="button" class="icon" data-x aria-label="關閉">✕</button></div>
+      <div class="small muted">${escapeHtml(what)}</div>
+      <div class="folder-pick">${opt(null, "🎫 最外層", 0)}${rows.map((r) => opt(r.id, `📁 ${escapeHtml(r.name)}`, r.depth + 1)).join("")}</div>
+      ${rows.length ? "" : `<div class="small muted">還沒有資料夾，先按「＋ 新資料夾」建立</div>`}`;
+    let choice;
+    dlg.addEventListener("click", (e) => {
+      if (e.target === dlg || e.target.closest("[data-x]")) return dlg.close();
+      const btn = e.target.closest("[data-to]");
+      if (!btn || btn.disabled) return;
+      choice = btn.dataset.to === "" ? null : Number(btn.dataset.to);
+      dlg.close();
+    });
+    dlg.addEventListener("close", () => {
+      dlg.remove();
+      resolve(choice);
+    });
+    document.body.append(dlg);
+    dlg.showModal();
+  });
+}
+
+function cachedJson(key) {
+  try {
+    return JSON.parse(localStorage.getItem(key) || "null");
+  } catch {
+    return null;
+  }
 }
 
 // ---------- ⏰ 提醒 ----------
