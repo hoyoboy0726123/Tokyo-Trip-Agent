@@ -427,6 +427,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       aiName: AI_NAME,
       settings: this.settings(),
       messages: this.recentMessages(60).map((m) => this.publicMessage(m)),
+      locateReq: this.locateRequest(),
       state: this.state(),
     });
   }
@@ -471,6 +472,16 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       case "location":
         if (Number.isFinite(msg.lat) && Number.isFinite(msg.lon)) this.saveLocation(user.name, msg);
         return;
+
+      // 有人打開「家人位置」：請每支開著 App 的手機回報一次；沒開的人 30 分鐘內打開 App 也會補報
+      case "locate_all": {
+        const prev = this.locateRequest();
+        if (prev && Date.now() - prev.ts < 60_000) return;
+        const req = { by: user.name, ts: Date.now() };
+        this.setSetting("locate_req", JSON.stringify(req));
+        this.broadcast({ type: "locate_request", ...req });
+        return;
+      }
 
       case "load_more": {
         const before = Number(msg.before) || Date.now();
@@ -940,7 +951,19 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
        ON CONFLICT(name) DO UPDATE SET lat = excluded.lat, lon = excluded.lon, accuracy = excluded.accuracy, ts = excluded.ts, area = excluded.area`,
       name, loc.lat, loc.lon, loc.accuracy ?? null, Date.now(), keepArea,
     );
-    if (!keepArea) this.ctx.waitUntil(this.ensureArea(name));
+    // 地圖開著的人馬上看到新位置；地名查好再更新一次
+    this.broadcast({ type: "locations", locations: this.memberLocation() });
+    if (!keepArea) this.ctx.waitUntil(this.ensureArea(name).then(() => this.broadcast({ type: "locations", locations: this.memberLocation() })));
+  }
+
+  /** 最近 30 分鐘內有人在找家人（之後才打開 App 的人也要補報位置） */
+  private locateRequest(): { by: string; ts: number } | null {
+    try {
+      const r = JSON.parse(this.setting("locate_req") || "null");
+      return r && Date.now() - r.ts < 30 * 60_000 ? r : null;
+    } catch {
+      return null;
+    }
   }
 
   /** 反查成員目前位置的地名並存起來（最多等 8 秒，失敗就算了，下次再查） */

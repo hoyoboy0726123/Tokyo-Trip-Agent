@@ -342,6 +342,8 @@ details.guide li + li { margin-top: 4px; }
 .guide-try button { text-align: left; font-size: 13px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 10px; padding: 8px 10px; }
 .family-map { height: 46dvh; min-height: 260px; border-radius: 14px; overflow: hidden; background: var(--line); }
 .sos-btn { background: var(--red) !important; color: #fff !important; border-color: var(--red) !important; font-weight: 700; }
+.flash-note { position: fixed; left: 50%; bottom: calc(76px + env(safe-area-inset-bottom)); transform: translate(-50%, 16px); opacity: 0; transition: opacity .25s, transform .25s; background: rgba(20, 20, 20, .88); color: #fff; padding: 10px 16px; border-radius: 999px; font-size: 14px; z-index: 60; pointer-events: none; max-width: calc(100% - 32px); text-align: center; }
+.flash-note.on { opacity: 1; transform: translate(-50%, 0); }
 .sos-banner { background: #d00; color: #fff; text-align: center; padding: 10px; font-size: 15px; cursor: pointer; animation: pulse 1s infinite; }
 .check-item { align-items: center; }
 .check-item.done span { color: var(--muted); text-decoration: line-through; }

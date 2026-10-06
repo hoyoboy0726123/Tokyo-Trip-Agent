@@ -189,6 +189,7 @@ function handle(m) {
       S.aiName = m.aiName;
       S.settings = m.settings;
       setState(m.state);
+      if (m.locateReq && m.locateReq.by !== m.me?.name) reportLocationFor(m.locateReq);
       els.messages.querySelectorAll(".msg, .day-sep, .unread-sep").forEach((n) => n.remove());
       S.lastDay = null;
       S.live.clear();
@@ -215,6 +216,16 @@ function handle(m) {
     case "settings":
       S.settings = m.settings;
       if (S.panel === "settings" || S.panel === "diary") renderPanel();
+      break;
+    case "locate_request":
+      if (m.by !== S.me?.name) reportLocationFor(m);
+      break;
+    case "locations":
+      if (S.state) {
+        S.state.locations = m.locations;
+        clearTimeout(S.mapRedraw);
+        if (S.panel === "map") S.mapRedraw = setTimeout(() => S.panel === "map" && renderPanel(), 800);
+      }
       break;
     case "state":
       setState(m.state);
@@ -1607,8 +1618,14 @@ function renderMapPanel(st, b) {
       <button class="btn" id="map-share" style="flex:1">📍 更新我的位置</button>
       <button class="btn danger sos-btn" id="map-sos" style="flex:1">🆘 我走散了</button>
     </div>
+    <p class="small muted">打開這一頁時，每個家人的手機會自動回報一次位置：開著 App 的人幾秒內就會更新，沒開的人下次打開 App 時補報。</p>
     <p class="small muted">按「🆘 我走散了」會把你的位置傳到群組，全家手機都會震動提醒，AI 也會幫忙安排集合地點。</p>`;
   bindBack(b);
+  if (!S.locateAsked || Date.now() - S.locateAsked > 60_000) {
+    S.locateAsked = Date.now();
+    wsSend({ type: "locate_all" });
+    getPosition().then((p) => wsSend({ type: "location", ...p })).catch(() => {});
+  }
   $("#map-share").addEventListener("click", async () => {
     try {
       const p = await getPosition();
@@ -1650,6 +1667,34 @@ function renderMapPanel(st, b) {
       const el = $("#family-map");
       if (el) el.innerHTML = `<div class="small muted" style="padding:16px">地圖載入失敗，請確認網路</div>`;
     });
+}
+
+// 家人在找人：自動回報一次位置（同一次請求只回報一次）
+async function reportLocationFor(req) {
+  try {
+    if (Number(localStorage.getItem("tta-located")) >= req.ts) return;
+    localStorage.setItem("tta-located", String(req.ts));
+  } catch {}
+  try {
+    const p = await getPosition();
+    wsSend({ type: "location", ...p });
+    flashNote(`📍 ${req.by} 在找家人，已回報你的位置`);
+  } catch {
+    flashNote(`📍 ${req.by} 在找家人，但這支手機沒開定位權限`);
+  }
+}
+
+function flashNote(text) {
+  let el = document.querySelector(".flash-note");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "flash-note";
+    document.body.append(el);
+  }
+  el.textContent = text;
+  el.classList.add("on");
+  clearTimeout(flashNote.t);
+  flashNote.t = setTimeout(() => el.classList.remove("on"), 4000);
 }
 
 function showSos(msg) {
