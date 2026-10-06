@@ -21,7 +21,7 @@ async function loadPhotos() {
     PH.error = e.message || "讀不到相片";
   }
   PH.loading = false;
-  if (S.panel === "photos") renderPanel();
+  if (S.panel === "photos" || S.panel === "nexttrip") renderPanel();
 }
 
 /** 這支手機能不能用分享面板一次存好幾張照片 */
