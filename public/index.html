@@ -62,13 +62,13 @@
       <div class="chips" id="chips" hidden></div>
       <div id="reply-bar" class="reply-bar" hidden></div>
       <div id="attach" class="attach" hidden>
-        <img id="attach-img" alt="" />
+        <div id="attach-imgs" class="attach-imgs"></div>
         <span id="attach-loc"></span>
         <button id="attach-clear" class="icon" aria-label="移除附件">✕</button>
       </div>
       <form id="send-form" class="send-row">
         <button type="button" id="chips-toggle" class="round-btn chips-toggle" aria-expanded="false" aria-label="展開快捷功能"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></button>
-        <label class="round-btn" aria-label="拍照或選照片"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg><input id="photo-input" type="file" accept="image/*" hidden /></label>
+        <label class="round-btn" aria-label="拍照或選照片"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg><input id="photo-input" type="file" accept="image/*" multiple hidden /></label>
         <textarea id="input" rows="1" placeholder="問旅伴 AI 任何事…" enterkeyhint="send" aria-label="訊息"></textarea>
         <button type="submit" class="send" id="send-btn" aria-label="送出"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg></button>
       </form>

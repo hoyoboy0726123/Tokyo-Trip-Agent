@@ -26,6 +26,12 @@ export interface RoomApi {
   expenseFind(keyword: string): ExpenseBrief[];
   documentSave(title: string, note: string, photoId: string, author: string, folder?: number | null): unknown;
   documentFind(keyword?: string): { id: number; title: string; note: string; photo_id: string; author: string; ts: number; folder: string }[];
+  /** 翻聊天室裡大家傳過的照片 */
+  chatPhotos(q: { date?: unknown; dateTo?: unknown; sender?: unknown; keyword?: unknown; ids?: string[]; count?: unknown }): Promise<{
+    total: number;
+    shown: { id: string; when: string; by: string; kind: string; note: string }[];
+    catalog: { id: string; when: string; by: string; kind: string; note: string }[];
+  }>;
   documentFolder(name: string, author: string): number | null;
   cacheGet(key: string, maxAgeMs: number): string | null;
   cacheSet(key: string, value: string): void;
@@ -1179,6 +1185,37 @@ export const TOOLS: Tool[] = [
       if (!photoId) return { error: "這則訊息沒有附照片，請附上票券照片再說要存起來" };
       const folder = args.folder ? room.documentFolder(String(args.folder), author) : null;
       return room.documentSave(String(args.title).slice(0, 80), String(args.note ?? "").slice(0, 300), photoId, author, folder);
+    },
+  },
+  {
+    label: "🖼 翻照片",
+    decl: {
+      name: "find_chat_photos",
+      description:
+        "找大家自己拍、傳到這個聊天室的照片，照片會直接顯示在回答下方。例如「第一天的照片」「昨天吃拉麵的照片」「小佑傳的照片」「我們在晴空塔的合照」。" +
+        "要看沒去過的地方、店家、料理長什麼樣（網路圖片）才用 find_images。",
+      parameters: {
+        type: "object",
+        properties: {
+          date: { type: "string", description: "哪一天（YYYY-MM-DD）；「今天」「昨天」「第一天」都要換算成日期。沒提到日期才留空（全部）" },
+          date_to: { type: "string", description: "找一段期間時的最後一天（YYYY-MM-DD）" },
+          sender: { type: "string", description: "誰傳的（成員名字），沒指定就留空" },
+          keyword: { type: "string", description: "照片內容，例如 拉麵、合照、晴空塔、夜景；沒指定就留空（會挑最精彩的）" },
+          ids: { type: "array", items: { type: "string" }, description: "要顯示的照片 id（前一次結果 catalog 裡的），要指定特定幾張時才填" },
+          count: { type: "number", description: "要幾張，預設 6，最多 8" },
+        },
+      },
+    },
+    async run(args, { room, attachImage }) {
+      const ids = Array.isArray(args.ids) ? args.ids.map(String) : undefined;
+      const r = await room.chatPhotos({ date: args.date, dateTo: args.date_to, sender: args.sender, keyword: args.keyword, ids, count: args.count });
+      for (const p of r.shown) attachImage?.({ src: `/api/photo/${p.id}`, caption: p.note, label: p.when, source: `${p.by} 傳的` });
+      if (!r.total) return { found: 0, note: "這段期間聊天室裡沒有照片（存成票券的不算）。如果其實是想看網路上的圖片，可以改用 find_images" };
+      if (!r.shown.length) return { found: 0, total: r.total, catalog: r.catalog, note: "照片說明裡找不到符合的；看 catalog 有沒有要的，有就用 ids 再呼叫一次，沒有就照實說" };
+      return {
+        shown: r.shown.length, total: r.total, photos: r.shown, ...(r.catalog.length ? { catalog: r.catalog } : {}),
+        note: "photos 是符合條件、已經顯示在回答下方的照片（大家自己傳的，不是網路圖片，不用加「僅供參考」）。回答要跟這些照片一致，用說明簡短介紹，不要說找不到；如果明顯不是要的，可以從 catalog 挑 ids 再呼叫一次",
+      };
     },
   },
   {

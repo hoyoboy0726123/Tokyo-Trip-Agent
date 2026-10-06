@@ -7,7 +7,7 @@ const els = {
   replyBar: $("#reply-bar"), pinBar: $("#pin-bar"), pins: $("#pins"), pinList: $("#pin-list"),
   nextCard: $("#next-card"), ncToggle: $("#nc-toggle"), chipsToggle: $("#chips-toggle"), tabbar: $("#tabbar"), more: $("#more"), moreActions: $("#more-actions"), moreAsks: $("#more-asks"),
   input: $("#input"), sendForm: $("#send-form"), sendBtn: $("#send-btn"), photoInput: $("#photo-input"),
-  attach: $("#attach"), attachImg: $("#attach-img"), attachLoc: $("#attach-loc"), attachClear: $("#attach-clear"),
+  attach: $("#attach"), attachImgs: $("#attach-imgs"), attachLoc: $("#attach-loc"), attachClear: $("#attach-clear"),
   panel: $("#panel"), panelTitle: $("#panel-title"), panelBody: $("#panel-body"), panelClose: $("#panel-close"),
   viewer: $("#viewer"), viewerImg: $("#viewer-img"), viewerDl: $("#viewer-dl"),
   translator: $("#translator"), trBody: $("#tr-body"), trTabs: $("#tr-tabs"),
@@ -16,7 +16,7 @@ const els = {
 
 const S = {
   me: null, aiName: "旅伴 AI", settings: {}, state: null, ws: null, retry: 0,
-  oldest: null, pending: { photo: null, photoUrl: null, location: null },
+  oldest: null, pending: { photos: [], location: null },
   live: new Map(), // 正在生成的 AI 訊息
   panel: null, lastDay: null,
 };
@@ -318,7 +318,9 @@ function messageNode(msg) {
   let body = "";
   // 這則是在回覆別的訊息：上面顯示引用，點一下跳回原訊息
   if (!isAI && msg.meta?.reply) body += `<button type="button" class="quote" data-quote="${escapeHtml(msg.meta.reply.id)}"><b>${escapeHtml(msg.meta.reply.author)}</b><span>${escapeHtml(plainExcerpt({ text: msg.meta.reply.text }))}</span></button>`;
-  if (msg.photo) body += `<img class="photo" src="${msg.photo}" loading="lazy" alt="照片" />`;
+  const pics = msg.photos?.length ? msg.photos : msg.photo ? [msg.photo] : [];
+  if (pics.length > 1) body += `<div class="photo-grid">${pics.map((src) => `<img class="photo" src="${escapeHtml(src)}" loading="lazy" alt="照片" />`).join("")}</div>`;
+  else if (pics.length) body += `<img class="photo" src="${escapeHtml(pics[0])}" loading="lazy" alt="照片" />`;
   if (msg.location) {
     const url = `https://www.google.com/maps/search/?api=1&query=${msg.location.lat},${msg.location.lon}`;
     body += `<div class="loc-card">📍 <a href="${url}" target="_blank" rel="noopener">分享了目前位置</a></div>`;
@@ -827,17 +829,18 @@ els.input.addEventListener("keydown", (e) => {
 els.sendForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = els.input.value.trim();
-  const { photo, location: loc } = S.pending;
-  if (!text && !photo && !loc) return;
+  const { photos, location: loc } = S.pending;
+  if (!text && !photos.length && !loc) return;
   els.sendBtn.disabled = true;
   try {
-    let photoId = null;
-    if (photo) {
-      const res = await fetch("/api/photo", { method: "POST", headers: { "content-type": photo.type }, body: photo });
+    const photoIds = [];
+    for (const [i, ph] of photos.entries()) {
+      if (photos.length > 1) els.attachImgs.dataset.status = `上傳 ${i + 1}/${photos.length}…`;
+      const res = await fetch("/api/photo", { method: "POST", headers: { "content-type": ph.blob.type }, body: ph.blob });
       if (!res.ok) throw new Error(`照片上傳失敗（${res.status}）`);
-      photoId = (await res.json()).id;
+      photoIds.push((await res.json()).id);
     }
-    if (wsSend({ type: "send", text, photoId, location: loc, replyTo: S.replyTo?.id })) {
+    if (wsSend({ type: "send", text, photoId: photoIds[0] ?? null, photoIds, location: loc, replyTo: S.replyTo?.id })) {
       S.replyTo = null;
       renderReplyBar();
       els.input.value = "";
@@ -848,6 +851,7 @@ els.sendForm.addEventListener("submit", async (e) => {
     alert(err.message);
   } finally {
     els.sendBtn.disabled = false;
+    delete els.attachImgs.dataset.status;
   }
 });
 
@@ -959,23 +963,46 @@ els.more.addEventListener("click", (e) => e.target === els.more && els.more.clos
 
 // ---------- 照片 ----------
 
+/** 一則訊息最多幾張照片（跟伺服器一樣）：菜單好幾頁可以一次翻譯整理 */
+const MAX_PHOTOS = 6;
+
 els.photoInput.addEventListener("change", async () => {
-  const file = els.photoInput.files?.[0];
+  const files = [...(els.photoInput.files || [])];
   els.photoInput.value = "";
-  if (!file) return;
-  try {
-    const blob = await resizeImage(file, 1280, 0.82);
-    S.pending.photo = blob;
-    if (S.pending.photoUrl) URL.revokeObjectURL(S.pending.photoUrl);
-    S.pending.photoUrl = URL.createObjectURL(blob);
-    els.attachImg.src = S.pending.photoUrl;
-    els.attach.hidden = false;
-    els.input.placeholder = "要問什麼？例如：這是什麼、幫我翻譯、比價";
-    els.input.focus();
-  } catch {
-    alert("無法讀取這張照片");
+  if (!files.length) return;
+  const room = MAX_PHOTOS - S.pending.photos.length;
+  if (files.length > room) alert(`一則訊息最多 ${MAX_PHOTOS} 張照片，${room > 0 ? `這次只加入前 ${room} 張` : "已經滿了"}；其他的請下一則再傳。`);
+  for (const file of files.slice(0, Math.max(0, room))) {
+    try {
+      // 菜單、文件的小字要看得清楚：長邊 1600
+      const blob = await resizeImage(file, 1600, 0.82);
+      S.pending.photos.push({ blob, url: URL.createObjectURL(blob) });
+    } catch {
+      alert("有一張照片無法讀取");
+    }
   }
+  renderAttach();
+  els.input.focus();
 });
+
+/** 附件列：照片縮圖（可以一張一張拿掉）＋再加一張 */
+function renderAttach() {
+  const list = S.pending.photos;
+  delete els.attachImgs.dataset.status;
+  els.attachImgs.innerHTML =
+    list.map((p, i) => `<span class="attach-thumb"><img src="${p.url}" alt="照片 ${i + 1}" /><button type="button" data-rm="${i}" aria-label="拿掉第 ${i + 1} 張">✕</button></span>`).join("") +
+    (list.length && list.length < MAX_PHOTOS ? `<button type="button" class="attach-add" aria-label="再加一張照片">＋</button>` : "");
+  els.attachImgs.querySelectorAll("[data-rm]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const [p] = S.pending.photos.splice(Number(b.dataset.rm), 1);
+      URL.revokeObjectURL(p.url);
+      renderAttach();
+    }),
+  );
+  els.attachImgs.querySelector(".attach-add")?.addEventListener("click", () => els.photoInput.click());
+  els.attach.hidden = !list.length && !S.pending.location && !els.attachLoc.textContent;
+  els.input.placeholder = list.length > 1 ? "例如：翻譯整理這幾張菜單" : list.length ? "要問什麼？例如：這是什麼、幫我翻譯、比價" : "問旅伴 AI 任何事…";
+}
 
 async function resizeImage(file, max, quality) {
   const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
@@ -1009,7 +1036,7 @@ async function attachLocation(thenSend) {
     if (thenSend) els.sendForm.requestSubmit();
   } catch (err) {
     els.attachLoc.textContent = "";
-    if (!S.pending.photo) els.attach.hidden = true;
+    if (!S.pending.photos.length) els.attach.hidden = true;
     alert(err.message);
     if (thenSend && els.input.value) els.sendForm.requestSubmit();
   }
@@ -1018,14 +1045,14 @@ async function attachLocation(thenSend) {
 function clearLocation() {
   S.pending.location = null;
   els.attachLoc.textContent = "";
-  if (!S.pending.photo) els.attach.hidden = true;
+  if (!S.pending.photos.length) els.attach.hidden = true;
 }
 
 function clearAttachment() {
-  S.pending.photo = null;
-  if (S.pending.photoUrl) URL.revokeObjectURL(S.pending.photoUrl);
-  S.pending.photoUrl = null;
-  els.attachImg.removeAttribute("src");
+  for (const p of S.pending.photos) URL.revokeObjectURL(p.url);
+  S.pending.photos = [];
+  els.attachImgs.innerHTML = "";
+  delete els.attachImgs.dataset.status;
   els.input.placeholder = "問旅伴 AI 任何事…";
   clearLocation();
   els.attach.hidden = true;

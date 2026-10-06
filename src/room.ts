@@ -100,7 +100,8 @@ const INTENTS: { tool: string; test: (text: string, hasPhoto: boolean) => boolea
   { tool: "save_document", test: (t, p) => p && /存成票券|存起來|存進票券|收進票券|保存這張|存下來/.test(t) },
   { tool: "find_documents", test: (t) => /(給我看|找出|叫出|拿出).{0,12}(票|門票|票券|訂位|確認信|QR|登機證)/.test(t) },
   // 「路線圖」「傳圖給我」也算要看圖；自己附了照片時是要 AI 看那張照片，不是上網找圖
-  { tool: "find_images", test: (t, p) => !p && /照片|圖片|相片|看圖|附圖|長什麼樣|路線圖|地鐵圖|捷運圖|平面圖|示意圖|菜單圖|(傳|給|找|看).{0,6}圖(?!書)|photo|picture|image/i.test(t) && !/存|票券|地圖/.test(t) },
+  { tool: "find_chat_photos", test: (t, p) => !p && OWN_PHOTO.test(t) && !/長什麼樣|網路|網上|存成|票券/.test(t), alt: ["find_images", "find_documents"] },
+  { tool: "find_images", test: (t, p) => !p && /照片|圖片|相片|看圖|附圖|長什麼樣|路線圖|地鐵圖|捷運圖|平面圖|示意圖|菜單圖|(傳|給|找|看).{0,6}圖(?!書)|photo|picture|image/i.test(t) && !/存|票券|地圖/.test(t) && !OWN_PHOTO.test(t), alt: ["find_chat_photos"] },
   { tool: "add_expense", test: (t, p) => (p && /收據|發票|記帳/.test(t)) || /(我付了|付了|花了|請客|記帳).{0,20}\d/.test(t) || /\d.{0,12}(日圓|円|元).{0,12}(我付|付的|記帳)/.test(t) },
   { tool: "create_reminder", test: (t) => /提醒(我|大家|全家|我們)/.test(t) && /\d/.test(t) },
   { tool: "update_checklist_item", test: (t) => /買到了|買好了|帶了|帶好了|打勾|已經買|辦好了|已經填|已經訂/.test(t) },
@@ -111,6 +112,58 @@ const INTENTS: { tool: string; test: (text: string, hasPhoto: boolean) => boolea
   { tool: "train_status", test: (t) => /延誤|停駛|誤點|停開|運行狀況|電車.{0,6}(正常|狀況)/.test(t) },
   { tool: "find_nearby", test: (t) => /附近|周邊|周圍|旁邊有什麼/.test(t), alt: ["web_search"] },
 ];
+
+/** 一則訊息附的所有照片：多張時存在 meta.photos（第一張同時放在 photo_id，收據、票券等舊功能照用） */
+function photosOf(m: { photo_id: string | null; meta: string | null }): string[] {
+  try {
+    const list = m.meta ? JSON.parse(m.meta).photos : null;
+    if (Array.isArray(list) && list.length) return list.map(String);
+  } catch {}
+  return m.photo_id ? [m.photo_id] : [];
+}
+
+/** 附了好幾張照片的訊息拆成一張一張（日記、找照片用）；同一張照片出現在好幾則訊息只留第一次 */
+function photoRows<T extends { photo_id: string | null; meta: string | null }>(msgs: T[]): T[] {
+  const seen = new Set<string>();
+  return msgs.flatMap((m) => photosOf(m).filter((x) => !seen.has(x) && !!seen.add(x)).map((photo_id) => ({ ...m, photo_id })));
+}
+
+/** 一則訊息最多幾張照片（菜單好幾頁一起翻譯；再多 AI 的回答會太長、容易漏） */
+const MAX_PHOTOS = 6;
+
+/** 自己拍、傳到聊天室的照片（「第一天的照片」「我們在晴空塔的合照」「小佑傳的照片」）要翻聊天室，不是上網找 */
+const OWN_PHOTO = /(我們|我的|我傳|我拍|大家|全家|家人|自己|第\s*[一二三四五六七八九十\d]+\s*天|今天|昨天|前天|那天|這幾天|\d{1,2}\s*[\/／月]\s*\d{1,2}|傳過|傳的|傳了|拍的|拍過|拍了|上傳).{0,12}(照片|相片|合照)|(照片|相片|合照).{0,8}(我們|大家|傳過|拍的|傳的)/;
+
+const PHOTO_SYNONYMS: [RegExp, string][] = [
+  [/合照|合影|全家|一家人|大家/, "合照 合影 全家 家人 一起"],
+  [/風景|景色|景觀/, "風景 景色 景觀 景點"],
+  [/夜景/, "夜景 夜晚 燈光"],
+  [/吃|美食|食物|料理|大餐/, "美食 料理 餐點 食物"],
+  [/小孩|孩子|兒子|女兒|寶寶/, "小孩 孩子 兒童"],
+];
+
+/** 照片說明和關鍵字有多像：整個詞出現 3 分；沒有就看中文兩字一組重疊多少（同義說法也算） */
+function photoMatch(keyword: string, text: string): number {
+  const grams = (s: string) => {
+    const c = s.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+    const g = new Set<string>(c.length === 1 ? [c] : []);
+    for (let i = 0; i < c.length - 1; i++) g.add(c.slice(i, i + 2));
+    return g;
+  };
+  const words = [keyword, ...PHOTO_SYNONYMS.filter(([re]) => re.test(keyword)).map(([, w]) => w)].join(" ").split(/[\s、,，]+/).filter(Boolean);
+  const hay = text.toLowerCase();
+  const tg = grams(text);
+  let score = 0;
+  for (const w of words) {
+    if (hay.includes(w.toLowerCase())) score += 3;
+    else {
+      const g = [...grams(w)];
+      const hit = g.filter((x) => tg.has(x)).length / Math.max(g.length, 1);
+      if (hit >= 0.6) score += hit;
+    }
+  }
+  return score;
+}
 
 /** 這個問題一定要用到、但模型還沒呼叫的工具（沒有就回 null） */
 function requiredTool(text: string, used: string[], hasPhoto: boolean): string | null {
@@ -447,7 +500,11 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
 
       case "send": {
         const text = String(msg.text ?? "").slice(0, 4000).trim();
-        const photoId = typeof msg.photoId === "string" ? msg.photoId : null;
+        // 一次最多 6 張（菜單好幾頁一起翻譯）；只收這個聊天室真的有的照片
+        const asked = [...new Set<string>((Array.isArray(msg.photoIds) ? msg.photoIds : typeof msg.photoId === "string" ? [msg.photoId] : []).map(String))].slice(0, MAX_PHOTOS);
+        const found = new Set(asked.length ? this.sql.exec(`SELECT id FROM photos WHERE id IN (${asked.map(() => "?").join(",")})`, ...asked).toArray().map((r) => r.id as string) : []);
+        const photoIds = asked.filter((x) => found.has(x));
+        const photoId = photoIds[0] ?? null;
         const loc = msg.location && Number.isFinite(msg.location.lat) ? msg.location : null;
         if (!text && !photoId && !loc) return;
         if (loc) this.saveLocation(user.name, loc);
@@ -455,7 +512,8 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
         const quoted = typeof msg.replyTo === "string" ? this.sql.exec<MessageRow>("SELECT * FROM messages WHERE id = ?", msg.replyTo).toArray()[0] : undefined;
         const reply = quoted ? { id: quoted.id, author: quoted.author, text: String(quoted.text ?? "").slice(0, 300) || (quoted.photo_id ? "（照片）" : "") } : null;
         const row = this.insertMessage({
-          author: user.name, role: "user", text, photo_id: photoId, lat: loc?.lat ?? null, lon: loc?.lon ?? null, meta: reply ? JSON.stringify({ reply }) : null,
+          author: user.name, role: "user", text, photo_id: photoId, lat: loc?.lat ?? null, lon: loc?.lon ?? null,
+          meta: reply || photoIds.length > 1 ? JSON.stringify({ ...(reply ? { reply } : {}), ...(photoIds.length > 1 ? { photos: photoIds } : {}) }) : null,
         });
         this.broadcast({ type: "message", message: this.publicMessage(row) });
         if (this.shouldReply(text, !!photoId, quoted?.role === "assistant")) {
@@ -849,6 +907,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       role: m.role,
       text: m.text,
       photo: m.photo_id ? `/api/photo/${m.photo_id}` : null,
+      ...(photosOf(m).length > 1 ? { photos: photosOf(m).map((x) => `/api/photo/${x}`) } : {}),
       location: m.lat != null && m.lon != null ? { lat: m.lat, lon: m.lon } : null,
       meta,
       ...(meta?.drafts?.length ? { drafts: this.draftsPublic(meta.drafts) } : {}),
@@ -1374,6 +1433,61 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
   }
 
   /**
+   * 翻大家傳到聊天室的照片（存成票券、證件的不算）：照日期、誰傳的、內容找。
+   * 內容靠日記用的照片說明（photo_notes）；還沒看過的先請 AI 看，一次最多 30 張
+   */
+  async chatPhotos(q: { date?: unknown; dateTo?: unknown; sender?: unknown; keyword?: unknown; ids?: string[]; count?: unknown }) {
+    const day = (d: unknown) => (typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null);
+    const from = day(q.date), to = day(q.dateTo) ?? from;
+    const where = ["photo_id IS NOT NULL", "role = 'user'"];
+    const args: number[] = [];
+    if (from) {
+      where.push("ts >= ?");
+      args.push(Date.parse(from + "T00:00:00Z") - 9 * 3600_000);
+    }
+    if (to) {
+      where.push("ts < ?");
+      args.push(Date.parse(to + "T00:00:00Z") - 9 * 3600_000 + 86400_000);
+    }
+    const docs = new Set(this.sql.exec("SELECT photo_id FROM documents WHERE photo_id IS NOT NULL").toArray().map((r) => r.photo_id as string));
+    let rows = photoRows(this.sql.exec<MessageRow>(`SELECT * FROM messages WHERE ${where.join(" AND ")} ORDER BY ts`, ...args).toArray()).filter((m) => !docs.has(m.photo_id as string));
+    const sender = String(q.sender ?? "").trim();
+    if (sender) rows = rows.filter((m) => m.author.includes(sender) || sender.includes(m.author));
+    // 說明一次全部讀出來（IN 清單有參數個數上限），沒看過的再請 AI 看
+    const notes = new Map<string, PhotoNote>(
+      this.sql.exec("SELECT * FROM photo_notes WHERE v = ?", PHOTO_NOTE_V).toArray().map((r) => [String(r.photo_id), { kind: String(r.kind), score: Number(r.score), note: String(r.note) }]),
+    );
+    const missing = rows.filter((m) => !notes.has(m.photo_id as string)).slice(-30);
+    if (missing.length) for (const [k, v] of await this.describePhotos(missing)) notes.set(k, v);
+    const item = (m: MessageRow) => {
+      const n = notes.get(m.photo_id as string);
+      return { id: m.photo_id as string, when: `${Number(new Date(m.ts + 9 * 3600_000).toISOString().slice(5, 7))}/${Number(new Date(m.ts + 9 * 3600_000).toISOString().slice(8, 10))} ${hhmm(m.ts)}`, by: m.author, kind: n?.kind ?? "", note: n?.note ?? (m.text ? `附言：${m.text.slice(0, 60)}` : "（還沒看過）"), score: n?.score ?? 3, ts: m.ts };
+    };
+    const keyword = String(q.keyword ?? "").trim();
+    // 收據、截圖、文件預設不列（問「收據的照片」「菜單」才列）
+    const info = /收據|發票|截圖|文件|菜單|票/.test(keyword);
+    const all = rows.map(item);
+    const items = all.filter((x) => info || !NOT_DIARY_PHOTO.has(x.kind));
+    const count = Math.min(8, Math.max(1, Number(q.count) || 6));
+    let picked: typeof items;
+    if (q.ids?.length) picked = all.filter((x) => q.ids!.includes(x.id)).slice(0, 8);
+    else if (keyword) {
+      picked = items
+        .map((x) => ({ x, s: photoMatch(keyword, `${x.kind} ${x.note}`) }))
+        .filter((h) => h.s > 0)
+        .sort((a, b) => b.s - a.s || b.x.score - a.x.score)
+        .slice(0, count)
+        .map((h) => h.x);
+    } else picked = [...items].sort((a, b) => b.score - a.score || a.ts - b.ts).slice(0, count);
+    picked.sort((a, b) => a.ts - b.ts);
+    // 給模型挑的清單：照片太多就留精彩度高的 30 張
+    const catalog = (items.length > 30 ? [...items].sort((a, b) => b.score - a.score).slice(0, 30).sort((a, b) => a.ts - b.ts) : items)
+      .filter((x) => !picked.includes(x))
+      .map(({ id, when, by, kind, note }) => ({ id, when, by, kind, note }));
+    return { total: rows.length, shown: picked.map(({ id, when, by, kind, note }) => ({ id, when, by, kind, note })), catalog };
+  }
+
+  /**
    * 日記挑照片前先看過每張照片：拍了什麼、適不適合放進日記（收據、截圖、證件不放）。
    * 看過的存進 photo_notes，重寫日記不用再看；一次送 5 張，照片多也不會太慢
    */
@@ -1448,7 +1562,7 @@ score：當旅遊日記插圖的價值，大部分照片是 2–4 分：
     const msgs = this.sql.exec<MessageRow>("SELECT * FROM messages WHERE ts >= ? AND ts < ? ORDER BY ts", start, start + 86400_000).toArray();
     // 證件、票券照片絕對不能進日記（日記可以分享給親友）
     const docs = new Set(this.sql.exec("SELECT photo_id FROM documents WHERE photo_id IS NOT NULL").toArray().map((r) => r.photo_id as string));
-    const photoMsgs = msgs.filter((m) => m.photo_id && m.role === "user" && !docs.has(m.photo_id)).slice(-40);
+    const photoMsgs = photoRows(msgs.filter((m) => m.photo_id && m.role === "user")).filter((m) => !docs.has(m.photo_id as string)).slice(-40);
     const notes = await this.describePhotos(photoMsgs);
     const score = (m: MessageRow) => notes.get(m.photo_id as string)?.score ?? 3;
     // 可以放進日記的照片依時間編號 P1、P2…；太多就留精彩度高的
@@ -1483,7 +1597,8 @@ score：當旅遊日記插圖的價值，大部分照片是 2–4 分：
             const t = m.text.replace(/\s+/g, " ");
             return `${hhmm(m.ts)} ${AI_NAME}：${t.slice(0, 120)}${t.length > 120 ? "…" : ""}`;
           }
-          const pic = m.photo_id ? (tag.has(m.photo_id) ? `（傳了照片 ${tag.get(m.photo_id)}）` : "（傳了照片）") : "";
+          const tags = photosOf(m).filter((x) => tag.has(x)).map((x) => tag.get(x));
+          const pic = m.photo_id ? (tags.length ? `（傳了照片 ${tags.join("、")}）` : "（傳了照片）") : "";
           return `${hhmm(m.ts)} ${m.author}：${m.text.slice(0, 300)}${pic}`;
         })
         .join("\n");
@@ -1809,8 +1924,9 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 地圖連結：工具回傳的連結可以直接用（find_nearby 給的是那家店的座標，照抄，不要改成店名搜尋，連鎖店用店名會跑到別家分店）；其他地點一律寫成 [📍地點名稱](map)，系統會自動換成 Google 地圖搜尋連結（地點名稱用日文或英文的正式名稱，連鎖店要加分店名，例如 [📍ドン・キホーテ 池袋駅西口店](map)）。不要自己寫 Google 地圖網址，絕對不要編 maps.app.goo.gl 短網址，也不要用自己記得的地址或座標當連結（記錯一個字就會指到別的地方）。
 - 成員在哪裡，一律以「成員最近位置」或訊息裡附的地名為準，絕對不要自己猜地名；以前聊天裡說過的位置可能已經過時，不要沿用。
 - 每次有人問「附近」都要重新呼叫工具查詢，不可以沿用之前的回答。
+- 要看「大家自己拍、傳到聊天室的照片」（第一天的照片、我們在某地的合照、某人傳的照片、昨天吃的拉麵）→ find_chat_photos（「第一天」「昨天」換算成日期，內容寫進 keyword），照片會顯示在回答下方，不是網路圖片；沒找到就照實說，不要拿網路圖片代替。
 - 你可以用 find_images 把網路上的圖片直接顯示給成員（照片、捷運／地鐵路線圖、平面圖、菜單…），絕對不要說「無法傳送圖片」。
-- 成員要求看照片／圖片／路線圖時，一定要用 find_images（店名或景點名稱加地名；好幾個地方就放進 queries 一次查完）；圖片會自動顯示在回答下方。絕對不要自己產生圖片網址或 Google 圖片搜尋連結，並提醒是網路圖片、僅供參考。沒有要求就不要找圖片。
+- 成員要求看網路上的照片／圖片／路線圖時，一定要用 find_images（店名或景點名稱加地名；好幾個地方就放進 queries 一次查完）；圖片會自動顯示在回答下方。絕對不要自己產生圖片網址或 Google 圖片搜尋連結，並提醒是網路圖片、僅供參考。沒有要求就不要找圖片。
 - 問「我附近有什麼」：直接用 find_nearby，near 留空（系統會自動用發問者的 GPS），回答時列出實際店名、距離、步行分鐘與地圖連結，不要只給「附近有很多」這種泛泛建議；需要評價再用 web_search 補充。問「某個地方附近有什麼」（例如龜有公園附近），也要用 find_nearby，near 填日文地名（亀有公園）。問「我在哪」用 get_member_locations，說出區域與最近的車站。
 - 迪士尼當天問排隊，用 disney_wait_times。
 - 問電車有沒有延誤、停駛 → train_status；問計程車多少錢、要多久 → taxi_fare；問地震、颱風、天氣會不會影響行程 → japan_alerts。
@@ -1822,6 +1938,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 有人說「我付了／花了…」→ 用 add_expense 產生記帳卡片；問「花多少、怎麼分」→ expense_summary。只有成員說付了、花了、要記帳，或傳收據時才記帳；問「怎麼儲值、怎麼買票、要多少錢」是在問做法或價格，直接回答，不要問金額、不要產生記帳卡片。
 - 成員做了決定、說了偏好、訂了東西 → 主動用 remember 記下來；行程要改就用 update_itinerary 產生修改卡片。只有 remember 成功後才能說「已記住」；沒有呼叫工具就不要聲稱已記住（系統也會在背景定期自動整理記憶）。
 - 收到照片：辨識菜單、商品、看板、車票並翻譯說明；商品可以查價比價並試算免稅（tax_free_check）。
+- 一次收到好幾張照片（例如菜單好幾頁）：當成同一份資料一起整理，不要一張一張分開回答。菜單：依類別分組，每道寫中文翻譯（原文）和價格（寫成「900 円（約 NT$190）」），標出推薦、辣、生食、含酒精、適合小孩的；看不清楚的照實說。
 - 安全第一：遇到緊急狀況提供日本緊急電話（警察 110、救護/消防 119）與最近的醫院資訊。`;
   }
 
@@ -1840,7 +1957,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
     return `（我在回覆 ${full?.author ?? reply.author} 的這則訊息，請針對它回答：「${text}」）\n`;
   }
 
-  private buildTurns(history: MessageRow[], trigger: MessageRow, image: Part | null): Turn[] {
+  private buildTurns(history: MessageRow[], trigger: MessageRow, images: Part[]): Turn[] {
     const turns: Turn[] = [];
     const push = (role: Turn["role"], text: string) => {
       const last = turns[turns.length - 1];
@@ -1852,18 +1969,17 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       if (m.role === "assistant") push("model", m.text.slice(0, HISTORY_CHARS) || "（略）");
       else if (m.role === "user") {
         let t = `［${m.author}］${replyNote(m.meta, 150)}${m.text.slice(0, HISTORY_CHARS)}`;
-        if (m.photo_id) t += "（附了一張照片）";
+        if (m.photo_id) t += photosOf(m).length > 1 ? `（附了 ${photosOf(m).length} 張照片）` : "（附了一張照片）";
         if (m.lat != null) t += `（分享位置 ${m.lat?.toFixed(5)},${m.lon?.toFixed(5)}）`;
         push("user", t);
       }
     }
-    let t = `［${trigger.author}］${this.replyContext(trigger)}${trigger.text || (trigger.photo_id ? "請看這張照片" : "")}`;
+    let t = `［${trigger.author}］${this.replyContext(trigger)}${trigger.text || (trigger.photo_id ? (photosOf(trigger).length > 1 ? "請看這幾張照片" : "請看這張照片") : "")}`;
     if (trigger.lat != null) {
       const area = this.memberLocation(trigger.author)[0]?.area;
       t += `（我目前的位置：${area ? `${area}附近，` : ""}座標 ${trigger.lat?.toFixed(5)},${trigger.lon?.toFixed(5)}。位置可能變了，需要地點資訊請用工具重新查詢，不要沿用之前的回答）`;
     }
-    const parts: Part[] = [{ text: t }];
-    if (image) parts.push(image);
+    const parts: Part[] = [{ text: t }, ...images];
     const last = turns[turns.length - 1];
     if (last && last.role === "user") last.parts.push(...parts);
     else turns.push({ role: "user", parts });
@@ -1883,11 +1999,11 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       : settings.hasGemini ? ["workers-ai", "gemini", "gemini-backup"]
       : ["workers-ai"];
 
-    let image: Part | null = null;
-    if (trigger.photo_id) {
-      const p = this.sql.exec("SELECT mime, data FROM photos WHERE id = ?", trigger.photo_id).toArray()[0];
-      if (p) image = { image: { mime: p.mime as string, data: toBase64(p.data as ArrayBuffer) } };
-    }
+    const photoParts: Part[] = photosOf(trigger).flatMap((pid) => {
+      const p = this.sql.exec("SELECT mime, data FROM photos WHERE id = ?", pid).toArray()[0];
+      return p ? [{ image: { mime: p.mime as string, data: toBase64(p.data as ArrayBuffer) } }] : [];
+    });
+    const image: Part | null = photoParts[0] ?? null;
     // 附了位置就先把地名查好，AI 才不會自己猜在哪裡
     if (trigger.lat != null) await this.ensureArea(trigger.author);
     const history = this.recentMessages(HISTORY_WINDOW);
@@ -1902,7 +2018,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       : undefined;
     let lastError = "";
     // 跨模型共用：Gemini 中途被限流時，備援模型接著已完成的工具結果繼續，不會重複記帳或重複查詢
-    let turns = this.buildTurns(history, trigger, image);
+    let turns = this.buildTurns(history, trigger, photoParts);
     const onWait = (ms: number) => this.broadcast({ type: "ai_note", id, text: `Gemini 額度冷卻中，等待 ${Math.ceil(ms / 1000)} 秒…` });
     const gate = this.geminiGate(1, FOREGROUND_MAX_WAIT, onWait);
     const backupGate = this.geminiGate(1, FOREGROUND_MAX_WAIT, onWait, true);
@@ -1922,6 +2038,8 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
             turns,
             tools: TOOL_DECLS,
             onDelta: (delta) => this.broadcast({ type: "ai_delta", id, delta }),
+            // 好幾張照片（菜單好幾頁）回答會很長，45 秒不夠
+            ...(photoParts.length > 1 ? { timeoutMs: 120_000 } : {}),
           });
           if (!res.calls.length) {
             // 模型偶爾偷懶：嘴上說「已加入清單」「圖片在下方」卻沒呼叫工具。提醒一次，重新回答
@@ -2073,7 +2191,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       try {
         const parts: Part[] = [{
           text: `成員（${user.name}）說：「${trigger.text}」
-現在是東京時間 ${now.date}（${now.weekday}）${now.time}。旅伴名單：${this.members().join("、") || user.name}。
+現在是東京時間 ${now.date}（${now.weekday}）${now.time}。旅程 ${TRIP.startDate} 到 ${TRIP.endDate}（第一天＝${TRIP.startDate}）。旅伴名單：${this.members().join("、") || user.name}。
 請產生呼叫工具「${need}」要用的參數。
 工具說明：${decl.description}
 參數格式（JSON Schema）：${JSON.stringify(decl.parameters)}
