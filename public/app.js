@@ -279,6 +279,8 @@ function handle(m) {
       }
       if (!m.ok && m.error) alert(m.error);
       else if (m.ok && m.action === "reset") alert("已清除 ✅");
+      else if (m.ok && m.action === "gemini_key") alert("Gemini 金鑰已更新，馬上生效 ✅");
+      if (m.action === "gemini_key" && S.panel === "settings") renderPanel();
       break;
   }
 }
@@ -1332,7 +1334,7 @@ function renderPanelInner() {
         <div class="card small">
           <div>AI 模型：<b>${s.provider === "workers-ai" ? `Workers AI（${escapeHtml(s.workersModel)}）` : `Gemini（${escapeHtml(s.geminiModel)}）`}</b></div>
           <div>回覆方式：<b>${s.replyMode === "mention" ? "只回覆 @AI 的訊息" : "每則訊息都回覆"}</b></div>
-          <div>網路搜尋：${s.hasTavily ? "✅ Tavily" : "⚠️ 未設定 TAVILY_API_KEY"}｜Gemini：${s.hasGemini ? "✅" : "⚠️ 未設定"}</div>
+          <div>網路搜尋：${s.hasTavily ? "✅ Tavily" : "⚠️ 未設定 TAVILY_API_KEY"}｜Gemini：${s.hasGemini ? (s.geminiKey ? "✅ 管理員換上的金鑰" : "✅") : "⚠️ 未設定"}</div>
           <div>Gemini 用量：<span id="gemini-usage">${escapeHtml(geminiUsageText(st.gemini))}</span></div>
         </div>
         ${S.me.admin ? `
@@ -1358,6 +1360,13 @@ function renderPanelInner() {
             <button class="btn small" id="brief-now">現在發一次早報</button>
             <button class="btn small" id="diary-now">現在寫今天的日記</button>
           </div>
+        </div>
+        <div class="card"><h3>🤖 Gemini 金鑰</h3>
+          <div class="small muted">目前使用：<b>${s.geminiKey ? `換上的金鑰 ${escapeHtml(s.geminiKey)}` : s.geminiDefault ? "預設金鑰" : "未設定"}</b></div>
+          <div class="small muted" style="margin-top:4px">額度用完時，用<b>另一個 Google 帳號</b>到 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> 申請新金鑰貼上，馬上生效。同一個帳號多建幾把不會多額度。</div>
+          <form class="row" id="gemini-key-form" style="margin-top:8px"><input name="k" placeholder="AIza…" autocomplete="off" style="flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--card)" /><button class="btn primary-sm">換上</button></form>
+          ${s.geminiKey && s.geminiDefault ? `<button class="btn small" id="gemini-key-reset" style="margin-top:6px">改回預設金鑰</button>` : ""}
+          <p class="small muted" style="margin-top:6px">🔐 金鑰加密保存，只有伺服器用得到，畫面上看不到完整內容。</p>
         </div>
         <div class="card"><h3>🧹 清除資料</h3>
           <p class="small muted">測試結束、正式使用前，或換一趟新行程時使用。只會清除勾選的項目，<b>清除後無法復原</b>。</p>
@@ -1387,6 +1396,14 @@ function renderPanelInner() {
         action({ action: "settings", travelers: new FormData(e.target).get("t") });
       });
       b.querySelectorAll("[data-auto]").forEach((x) => x.addEventListener("change", () => action({ action: "settings", [x.dataset.auto]: x.checked })));
+      b.querySelector("#gemini-key-form")?.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const k = e.target.k.value.trim();
+        if (!k) return;
+        e.target.querySelector("button").textContent = "檢查中…";
+        action({ action: "gemini_key", key: k });
+      });
+      b.querySelector("#gemini-key-reset")?.addEventListener("click", () => confirm("改回預設的 Gemini 金鑰？") && action({ action: "gemini_key", key: "" }));
       b.querySelector("#brief-now")?.addEventListener("click", (e) => {
         e.target.textContent = "產生中…";
         action({ action: "brief_now" });

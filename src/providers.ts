@@ -325,6 +325,18 @@ async function streamWorkersAI(env: Env, model: string, input: Record<string, un
   return { text: cleanModelText(text), calls: parsed };
 }
 
+/** 換金鑰前先確認真的能用；連不上 Google 時放行（不要因為網路問題擋住） */
+export async function validateGemini(key: string): Promise<string | null> {
+  if (key.length < 20) return "Gemini 金鑰太短，請重新複製";
+  try {
+    const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", { headers: { "x-goog-api-key": key }, signal: AbortSignal.timeout(10_000) });
+    if (res.status === 400 || res.status === 401 || res.status === 403) return "Gemini 金鑰無效，請重新複製";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** gemini = 主要模型；gemini-backup = 另一個 Gemini 模型（目前備援順序未使用） */
 export function providerFor(env: Env, id: string, gate?: GeminiGate): Provider {
   if (id === "workers-ai") return workersAIProvider(env);

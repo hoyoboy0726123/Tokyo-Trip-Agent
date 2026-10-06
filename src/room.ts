@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import { safeEqual } from "./auth";
-import { geminiProvider, parseArgs, providerFor, type GeminiGate } from "./providers";
+import { decryptText, encryptText, maskKey, safeEqual } from "./auth";
+import { geminiProvider, parseArgs, providerFor, validateGemini, type GeminiGate } from "./providers";
 import { GeminiLimiter, RateLimitedError } from "./ratelimit";
 import { DRAFT_TOOLS, japanAlerts, reverseArea, runTool, SCALE_TEXT, toolLabel, TOOL_DECLS, type AttachedImage, type DraftInput, type ExpenseInput, type RoomApi } from "./tools";
 import { fixMapLinks, type MapFixOptions } from "./maplinks";
@@ -169,23 +169,37 @@ function toBase64(buf: ArrayBuffer): string {
   return btoa(s);
 }
 
+/** 金鑰指紋：分開記每把金鑰的每日用量，不存金鑰本身 */
+async function keyTag(key: string): Promise<string> {
+  const d = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)));
+  return [...d.slice(0, 4)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export class TripRoom extends DurableObject<Env> implements RoomApi {
   private sql: SqlStorage;
   private queue: Promise<unknown> = Promise.resolve();
-  private limiter: GeminiLimiter;
+  private limiter!: GeminiLimiter;
   /** 備援 Gemini 模型的額度在 Google 那邊是分開算的，冷卻也分開 */
-  private backupLimiter: GeminiLimiter;
+  private backupLimiter!: GeminiLimiter;
+  private resetLimiters: () => void;
+  /** 管理員在設定裡換的 Gemini 金鑰；undefined = 還沒讀，"" = 用部署時設定的預設金鑰 */
+  private customGemini: string | undefined;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     const limits = { rpm: Number(env.GEMINI_RPM) || 15, tpm: Number(env.GEMINI_TPM) || 250_000, rpd: Number(env.GEMINI_RPD) || 500 };
+    // 每把金鑰的每日用量分開記：換新金鑰馬上有整份額度，換回原本那把也接得上它的用量
+    const dayKey = (key: string) => key + (this.setting("key_gemini") ? `_${this.setting("key_gemini_tag")}` : "");
     const dayStore = (key: string) => ({
-      load: () => JSON.parse(this.setting(key, '{"day":"","count":0}')),
-      save: (v: { day: string; count: number }) => this.setSetting(key, JSON.stringify(v)),
+      load: () => JSON.parse(this.setting(dayKey(key), '{"day":"","count":0}')),
+      save: (v: { day: string; count: number }) => this.setSetting(dayKey(key), JSON.stringify(v)),
     });
-    this.limiter = new GeminiLimiter(limits, dayStore("gemini_day"));
-    this.backupLimiter = new GeminiLimiter(limits, dayStore("gemini_day_backup"));
+    this.resetLimiters = () => {
+      this.limiter = new GeminiLimiter(limits, dayStore("gemini_day"));
+      this.backupLimiter = new GeminiLimiter(limits, dayStore("gemini_day_backup"));
+    };
+    this.resetLimiters();
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, ts INTEGER, author TEXT, role TEXT, text TEXT, photo_id TEXT, lat REAL, lon REAL, meta TEXT);
       CREATE INDEX IF NOT EXISTS messages_ts ON messages(ts);
@@ -267,6 +281,19 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     this.sql.exec("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, value);
   }
 
+  /** 管理員換過 Gemini 金鑰就用那把，否則用部署時設定的 GEMINI_API_KEY */
+  private async aiEnv(): Promise<Env> {
+    if (this.customGemini === undefined) {
+      this.customGemini = await decryptText(this.env, this.setting("key_gemini"));
+      if (!this.customGemini && this.setting("key_gemini")) {
+        // 解不開（改過密碼）：當成沒換過
+        for (const k of ["key_gemini", "key_gemini_mask", "key_gemini_tag"]) this.setSetting(k, "");
+        this.resetLimiters();
+      }
+    }
+    return this.customGemini ? { ...this.env, GEMINI_API_KEY: this.customGemini } : this.env;
+  }
+
   private settings() {
     return {
       provider: this.setting("provider", this.env.DEFAULT_PROVIDER || "gemini"),
@@ -274,7 +301,9 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       travelers: this.setting("travelers"),
       geminiModel: this.env.GEMINI_MODEL,
       workersModel: this.env.WORKERS_AI_MODEL,
-      hasGemini: !!this.env.GEMINI_API_KEY,
+      hasGemini: !!this.env.GEMINI_API_KEY || !!this.setting("key_gemini"),
+      geminiKey: this.setting("key_gemini_mask"), // 管理員換上的金鑰（遮罩），空字串 = 用預設金鑰
+      geminiDefault: !!this.env.GEMINI_API_KEY,
       hasTavily: !!this.env.TAVILY_API_KEY,
       autoBrief: this.setting("auto_brief", "1") === "1", // 每天 07:00 早報
       autoDiary: this.setting("auto_diary", "1") === "1", // 每天 22:00 旅遊日記
@@ -525,6 +554,23 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
         }
         this.broadcast({ type: "settings", settings: this.settings() });
         break;
+      case "gemini_key": {
+        if (!user.admin) return reply(false, "只有管理員可以換金鑰");
+        const key = String(msg.key ?? "").trim();
+        if (key) {
+          const err = await validateGemini(key);
+          if (err) return reply(false, err);
+        }
+        this.setSetting("key_gemini", await encryptText(this.env, key));
+        this.setSetting("key_gemini_mask", maskKey(key));
+        this.setSetting("key_gemini_tag", key ? await keyTag(key) : "");
+        this.customGemini = key;
+        // 新金鑰是另一份額度：舊金鑰的冷卻不帶過去
+        this.resetLimiters();
+        this.broadcast({ type: "settings", settings: this.settings() });
+        this.broadcastState();
+        break;
+      }
       // ---- 清單 ----
       case "checklist_add": {
         const items = String(msg.item ?? "").split(/\n/).map((s) => s.trim()).filter(Boolean);
@@ -1256,7 +1302,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     for (const pid of order) {
       if (pid !== "workers-ai" && !this.settings().hasGemini) continue;
       try {
-        const r = await providerFor(this.env, pid, this.geminiGate(1, 5_000, undefined, pid === "gemini-backup")).generate({ system, turns: [{ role: "user", parts: [{ text: prompt }] }], maxTokens });
+        const r = await providerFor(await this.aiEnv(), pid, this.geminiGate(1, 5_000, undefined, pid === "gemini-backup")).generate({ system, turns: [{ role: "user", parts: [{ text: prompt }] }], maxTokens });
         if (r.text.trim()) return r.text.trim();
       } catch (e) {
         if (!(e instanceof RateLimitedError)) console.error(`generatePlain via ${pid} failed`, e);
@@ -1270,7 +1316,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
     const writer = this.env.GEMINI_WRITER_MODEL;
     if (writer && this.settings().hasGemini) {
       try {
-        const r = await geminiProvider(this.env, writer).generate({ system, turns: [{ role: "user", parts: [{ text: prompt }] }], timeoutMs: 150_000 });
+        const r = await geminiProvider(await this.aiEnv(), writer).generate({ system, turns: [{ role: "user", parts: [{ text: prompt }] }], timeoutMs: 150_000 });
         if (r.text.trim()) return r.text.trim();
       } catch (e) {
         console.error(`diary via ${writer} failed`, e);
@@ -1343,7 +1389,7 @@ score：當旅遊日記插圖的價值，大部分照片是 2–4 分：
       let parsed: any[] | null = null;
       for (const pid of order) {
         try {
-          const r = await providerFor(this.env, pid, this.geminiGate(1, 20_000, undefined, pid === "gemini-backup")).generate({
+          const r = await providerFor(await this.aiEnv(), pid, this.geminiGate(1, 20_000, undefined, pid === "gemini-backup")).generate({
             system: "你是幫家庭旅遊日記挑照片的編輯，只輸出 JSON。",
             turns: [{ role: "user", parts }],
             json: true,
@@ -1839,7 +1885,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
     const backupGate = this.geminiGate(1, FOREGROUND_MAX_WAIT, onWait, true);
 
     for (const pid of order) {
-      const provider: Provider = providerFor(this.env, pid, pid === "gemini-backup" ? backupGate : gate);
+      const provider: Provider = providerFor(await this.aiEnv(), pid, pid === "gemini-backup" ? backupGate : gate);
       this.broadcast({ type: "ai_start", id, provider: provider.id, model: provider.model });
       let finalText = "";
       const nudged = new Set<string>();
@@ -1948,7 +1994,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
     }
 
     const row = this.insertMessage({
-      id, author: AI_NAME, role: "assistant", text: `抱歉，AI 暫時無法回答 🙇\n\n\`${lastError.slice(0, 200)}\``, photo_id: null, lat: null, lon: null,
+      id, author: AI_NAME, role: "assistant", text: `抱歉，AI 暫時無法回答 🙇\n\n如果是 Gemini 額度用完，管理員可以到下方「設定」換一把新的 Gemini 金鑰，馬上生效。\n\n\`${lastError.slice(0, 200)}\``, photo_id: null, lat: null, lon: null,
       // 中途產生的確認卡片還是附上，成員照樣可以確認
       meta: JSON.stringify({ error: true, ...(drafts.length ? { drafts } : {}) }),
     });
@@ -2076,7 +2122,7 @@ ${transcript}
     try {
       for (const pid of order) {
         try {
-          const res = await providerFor(this.env, pid, gate).generate({
+          const res = await providerFor(await this.aiEnv(), pid, gate).generate({
             system: "你是負責整理旅遊群組長期記憶的助理，只輸出 JSON。",
             turns: [{ role: "user", parts: [{ text: prompt }] }],
             json: true,
