@@ -1127,6 +1127,7 @@ function setTab(tab) {
 els.tabbar.querySelectorAll("button").forEach((b) =>
   b.addEventListener("click", () => {
     if (b.dataset.tab === "chat") {
+      if (els.translator.open) closeTranslator();
       if (els.panel.open) els.panel.close();
       else scrollToBottom(true);
       return;
@@ -1138,10 +1139,12 @@ els.tabbar.querySelectorAll("button").forEach((b) =>
 els.panelClose.addEventListener("click", () => els.panel.close());
 els.panel.addEventListener("close", () => {
   S.panel = null;
-  setTab("chat");
+  // close 事件是非同步的：從面板直接切到翻譯時，別把分頁列標回聊天
+  setTab(els.translator.open ? "translator" : "chat");
 });
 
 function openPanel(name) {
+  if (els.translator.open) closeTranslator();
   S.panel = name;
   renderPanel();
   setTab(TAB_OF[name] ?? "hub");
@@ -2107,12 +2110,19 @@ $("#showcase-close").addEventListener("click", () => els.showcase.close());
 // ---------- 開關與分頁 ----------
 
 function openTranslator() {
+  if (els.panel.open) els.panel.close();
   renderTranslator();
-  if (!els.translator.open) els.translator.showModal();
+  // 不用 showModal：modal 會讓底部分頁列點不到
+  if (!els.translator.open) els.translator.show();
+  setTab("translator");
 }
-$("#tr-close").addEventListener("click", () => {
+function closeTranslator() {
   TR.rec?.stop();
   els.translator.close();
+}
+$("#tr-close").addEventListener("click", closeTranslator);
+els.translator.addEventListener("close", () => {
+  if (!els.panel.open) setTab("chat");
 });
 els.trTabs.querySelectorAll("button").forEach((b) =>
   b.addEventListener("click", () => {
