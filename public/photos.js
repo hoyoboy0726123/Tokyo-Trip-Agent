@@ -43,14 +43,14 @@ function renderPhotosPanel(b) {
   }
   const share = canShareFiles();
   b.innerHTML = `${backToHub()}
-    <div class="card ph-head">
+    <div class="card pic-head">
       <div><b>${d.count} 張照片</b><span class="small muted">　照片空間用了 ${phMB(d.bytes)}${d.limit ? `／上限 ${phMB(d.limit)}` : ""}</span></div>
-      ${d.limit ? `<div class="ph-bar"><i style="width:${Math.min(100, (d.bytes / d.limit) * 100).toFixed(1)}%"></i></div>` : ""}
+      ${d.limit ? `<div class="pic-bar"><i style="width:${Math.min(100, (d.bytes / d.limit) * 100).toFixed(1)}%"></i></div>` : ""}
       <div class="small muted">照片存在這個旅程的雲端空間。${share ? "按每天的「存到手機相簿」就會存進手機，一次 10 張，張數多要按幾次。" : "按每天的「下載這天」會打包成 zip。"}</div>
     </div>
     ${d.days.length ? d.days.map((day) => phDayCard(day, share)).join("") : `<div class="card small muted">還沒有照片。在聊天傳的照片、票券保管箱的票券，都會出現在這裡。</div>`}`;
   bindBack(b);
-  b.querySelectorAll("details.ph-day").forEach((x) =>
+  b.querySelectorAll("details.pic-day").forEach((x) =>
     x.addEventListener("toggle", () => {
       const was = PH.open.has(x.dataset.day);
       if (x.open === was) return;
@@ -69,14 +69,14 @@ function phDayCard(day, share) {
   const left = p ? p.files.length - p.next : day.photos.length;
   const busy = PH.busy[day.date];
   const label = busy ? "準備中…" : !p ? `📲 存到手機相簿（${day.photos.length} 張）` : left > 0 ? `📲 存第 ${Math.floor(p.next / SHARE_BATCH) + 1} 批（${Math.min(SHARE_BATCH, left)} 張）` : "✅ 這天都存好了";
-  return `<details class="card ph-day" data-day="${day.date}" ${open ? "open" : ""}>
+  return `<details class="card pic-day" data-day="${day.date}" ${open ? "open" : ""}>
     <summary><b>${phDay(day.date)}</b><span class="small muted">${day.photos.length} 張・${phMB(day.bytes)}</span></summary>
-    <div class="row ph-actions">
+    <div class="row pic-actions">
       ${share ? `<button type="button" class="btn small primary-sm" data-ph-share="${day.date}" ${busy || (p && left <= 0) ? "disabled" : ""}>${label}</button>` : ""}
       <button type="button" class="btn small" data-ph-zip="${day.date}" ${PH.busy[`zip${day.date}`] ? "disabled" : ""}>${PH.busy[`zip${day.date}`] ? "打包中…" : "⬇️ 下載這天（zip）"}</button>
     </div>
     ${p && left > 0 && p.next === 0 ? `<div class="small muted">準備好了，再按一次就會叫出分享面板，選「儲存影像」。</div>` : ""}
-    ${open ? `<div class="ph-grid">${day.photos.map((x) => `<button type="button" class="ph-cell" data-ph="${escapeHtml(x.id)}" aria-label="${escapeHtml(`${x.time} ${x.by}${x.ticket ? `・票券 ${x.ticket}` : ""}`)}"><img src="/api/photo/${encodeURIComponent(x.id)}" loading="lazy" alt="" />${x.ticket ? `<span class="ph-tag">🎫</span>` : ""}</button>`).join("")}</div>` : ""}
+    ${open ? `<div class="pic-grid">${day.photos.map((x) => `<button type="button" class="pic-cell" data-ph="${escapeHtml(x.id)}" aria-label="${escapeHtml(`${x.time} ${x.by}${x.ticket ? `・票券 ${x.ticket}` : ""}`)}"><img src="/api/photo/${encodeURIComponent(x.id)}" loading="lazy" alt="" />${x.ticket ? `<span class="pic-tag">🎫</span>` : ""}</button>`).join("")}</div>` : ""}
   </details>`;
 }
 
