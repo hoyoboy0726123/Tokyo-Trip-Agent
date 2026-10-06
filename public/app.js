@@ -1253,6 +1253,7 @@ function renderPanelInner() {
     b.innerHTML = `<div class="card small muted">目前沒有網路，這個功能暫時不能用。翻譯常用句和票券保管箱離線也能看。</div>`;
     return;
   }
+  if (S.panel === "photos") return renderPhotosPanel(b);
   if (["hub", "guide", "map", "checklist", "tickets", "reminders", "diary", "diary-edit"].includes(S.panel)) return renderToolPanel(st, b);
   switch (S.panel) {
     case "itinerary": {
@@ -1298,7 +1299,8 @@ function renderPanelInner() {
       const members = st.members.length ? st.members : [S.me.name];
       b.innerHTML = `
         <div class="card"><div class="small muted">總花費（${ex.count} 筆）</div>
-          <div class="big">${yen(ex.total_jpy)}</div><div class="muted">約 NT$${ex.total_twd.toLocaleString()}</div></div>
+          <div class="big">${yen(ex.total_jpy)}</div><div class="muted">約 NT$${ex.total_twd.toLocaleString()}</div>
+          ${ex.count ? `<a class="btn small" href="/api/expenses.csv" download style="margin-top:8px">⬇️ 下載帳目（CSV）</a>` : ""}</div>
         <div class="card"><h3>每人</h3>
           ${ex.balance.map((p) => `<div class="item small"><span>${escapeHtml(p.name)}</span><span>付 ${yen(p.paid)}｜應付 ${yen(p.share)}｜<b style="color:${p.net >= 0 ? "#17a398" : "var(--red)"}">${p.net >= 0 ? "+" : ""}${yen(p.net)}</b></span></div>`).join("") || `<div class="small muted">還沒有帳目</div>`}
           ${ex.transfers.length ? `<h3 style="margin-top:10px">結算建議</h3>${ex.transfers.map((t) => `<div class="small">👉 ${escapeHtml(t.from)} 給 ${escapeHtml(t.to)} <b>${yen(t.jpy)}</b></div>`).join("")}` : ""}
@@ -1477,6 +1479,7 @@ const TOOL_CARDS = [
   ["checklist", "list", "共用清單", "行李、購物、待辦"],
   ["reminders", "bell", "提醒", "時間到在群組通知"],
   ["diary", "book", "旅遊日記", "每晚自動寫、匯出相簿"],
+  ["photos", "camera", "相片", "每天的照片，存到手機"],
 ];
 
 function renderToolPanel(st, b) {

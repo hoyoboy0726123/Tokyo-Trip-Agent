@@ -80,6 +80,11 @@ export default {
         return room(env).fetch(new Request("https://room/ws", { headers }));
       }
 
+      // 相片清單、帳目下載
+      if ((path === "/api/photos" || path === "/api/expenses.csv") && req.method === "GET") {
+        return room(env).fetch(new Request(`https://room${path.slice(4)}`, { headers }));
+      }
+
       if (path === "/api/photo" && req.method === "POST") {
         return room(env).fetch(new Request("https://room/photo", { method: "POST", headers, body: req.body }));
       }

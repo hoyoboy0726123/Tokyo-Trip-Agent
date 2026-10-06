@@ -442,6 +442,9 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
 
+    if (url.pathname === "/photos" && req.method === "GET") return this.photoList();
+    if (url.pathname === "/expenses.csv" && req.method === "GET") return this.expensesCsv();
+
     if (url.pathname === "/photo" && req.method === "POST") {
       const mime = req.headers.get("content-type") ?? "image/jpeg";
       if (!mime.startsWith("image/")) return new Response("只接受圖片", { status: 400 });
@@ -1872,6 +1875,64 @@ ${transcript || "（今天群組沒什麼對話）"}`;
    * 自動回想：從「最近訊息視窗之外」的舊聊天裡，找出跟這次問題字詞重疊最多的訊息。
    * 用中文雙字詞比對，不需要向量資料庫；旅程期間訊息量不大，全掃也很快。
    */
+  // ================= 相片、帳目下載 =================
+
+  /** 相片：大家在聊天傳的照片和票券照片，依日期分組 */
+  private photoList(): Response {
+    const size = new Map(this.sql.exec("SELECT id, ts, author, LENGTH(data) AS n FROM photos").toArray().map((r) => [String(r.id), { ts: Number(r.ts), n: Number(r.n) }]));
+    const items = new Map<string, { id: string; ts: number; by: string; bytes: number; ticket?: string }>();
+    for (const m of photoRows(this.sql.exec<MessageRow>("SELECT * FROM messages WHERE photo_id IS NOT NULL AND role = 'user' ORDER BY ts").toArray())) {
+      const s = size.get(m.photo_id as string);
+      if (s && !items.has(m.photo_id as string)) items.set(m.photo_id as string, { id: m.photo_id as string, ts: m.ts, by: m.author, bytes: s.n });
+    }
+    for (const d of this.sql.exec("SELECT photo_id, title, author FROM documents WHERE photo_id IS NOT NULL").toArray()) {
+      const id = String(d.photo_id), s = size.get(id);
+      if (!s) continue;
+      const cur = items.get(id);
+      if (cur) cur.ticket = String(d.title);
+      else items.set(id, { id, ts: s.ts, by: String(d.author), bytes: s.n, ticket: String(d.title) });
+    }
+    const days = new Map<string, { date: string; bytes: number; photos: { id: string; time: string; by: string; ticket?: string }[] }>();
+    for (const x of [...items.values()].sort((a, b) => a.ts - b.ts)) {
+      const date = new Date(x.ts + 9 * 3600_000).toISOString().slice(0, 10);
+      const day = days.get(date) ?? { date, bytes: 0, photos: [] };
+      day.photos.push({ id: x.id, time: hhmm(x.ts), by: x.by, ...(x.ticket ? { ticket: x.ticket } : {}) });
+      day.bytes += x.bytes;
+      days.set(date, day);
+    }
+    const total = Number(this.sql.exec("SELECT COALESCE(SUM(LENGTH(data)), 0) AS n FROM photos").one().n);
+    return Response.json({ ok: true, count: items.size, bytes: total, limit: null, days: [...days.values()].reverse() });
+  }
+
+  /** 帳目下載成 CSV：Excel、Google 試算表都能開（開頭加 BOM 中文才不會亂碼） */
+  private expensesCsv(): Response {
+    // 文字欄位開頭是 = + - @ 會被 Excel 當成公式，前面補一個 '
+    const cell = (v: unknown) => {
+      let s = String(v ?? "");
+      if (typeof v === "string" && /^[=+\-@]/.test(s)) s = `'${s}`;
+      return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const line = (xs: unknown[]) => xs.map(cell).join(",");
+    const out = [line(["日期", "項目", "分類", "金額", "幣別", "換算日圓", "約合台幣", "付款人", "分攤", "記錄的人"])];
+    for (const r of this.sql.exec("SELECT * FROM expenses ORDER BY date, ts").toArray()) {
+      let split = "";
+      try {
+        split = (JSON.parse(String(r.split_among || "[]")) as string[]).join("、");
+      } catch {}
+      out.push(line([r.date, r.description, r.category, r.amount, r.currency, r.amount_jpy, r.amount_twd, r.payer, split, r.author]));
+    }
+    const s = this.expenseSummary();
+    if (s.balance.length) {
+      out.push("", line(["結算", "已付", "應分攤", "差額（正數＝要收回）"]));
+      for (const b of s.balance) out.push(line([b.name, b.paid, b.share, b.net]));
+      for (const t of s.transfers) out.push(line([`${t.from} 給 ${t.to}`, t.jpy]));
+    }
+    const name = `${TRIP.title}-帳目.csv`.replace(/[\\/:*?"<>|]/g, "");
+    return new Response("\uFEFF" + out.join("\r\n"), {
+      headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="expenses.csv"; filename*=UTF-8''${encodeURIComponent(name)}`, "cache-control": "no-store" },
+    });
+  }
+
   // ================= 記憶多了只挑相關的：雙字詞＋語意向量（Workers AI bge-m3）＋最近記的＋待辦預訂 =================
 
   private memQuery: { text: string; sims: Map<number, number> } | null = null;

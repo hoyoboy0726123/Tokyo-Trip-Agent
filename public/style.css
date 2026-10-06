@@ -414,3 +414,15 @@ details.guide li + li { margin-top: 4px; }
 .attach-add { width: 52px; height: 52px; border-radius: 10px; border: 1.5px dashed var(--line); background: transparent; color: var(--muted); font-size: 22px; cursor: pointer; }
 .rich .photo-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; max-width: 300px; margin: 2px 0 6px; }
 .rich .photo-grid img.photo { width: 100%; height: 130px; max-height: none; margin: 0; object-fit: cover; border-radius: 8px; }
+
+/* 相片 */
+.ph-head { display: grid; gap: 6px; }
+.ph-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.ph-bar i { display: block; height: 100%; background: var(--red); }
+.ph-day > summary { display: flex; justify-content: space-between; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+.ph-day > summary::-webkit-details-marker { display: none; }
+.ph-actions { gap: 6px; flex-wrap: wrap; justify-content: flex-start; margin: 10px 0 8px; }
+.ph-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; margin-top: 6px; }
+.ph-cell { position: relative; padding: 0; border: 0; border-radius: 4px; overflow: hidden; aspect-ratio: 1; background: var(--line); cursor: zoom-in; }
+.ph-cell img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.ph-tag { position: absolute; top: 3px; right: 3px; padding: 0 3px; border-radius: 6px; background: rgba(255, 255, 255, .85); font-size: 12px; }
