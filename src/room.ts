@@ -182,6 +182,58 @@ const HOME_NAMES = /IKEBUKURO\s*4|要町\s*1-44-8|1-44-8|セレッソ|Seresso/i;
 /** 導航用的民宿地址（不含郵遞區號與大樓名，Google 地圖最穩） */
 const HOME_ADDRESS = "東京都豊島区要町1-44-8";
 
+/** 記憶超過幾條就改成只挑相關的、挑幾條（跟通用版的個人助理一樣） */
+const MEMORY_ALL = 40;
+const MEMORY_PICK = 25;
+/** 語意相似度超過這個才加分；加多少 */
+const SEM_MIN = 0.4;
+const SEM_W = 10;
+
+function bigrams(s: string): Set<string> {
+  const clean = s.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+  const set = new Set<string>();
+  for (let i = 0; i < clean.length - 1; i++) set.add(clean.slice(i, i + 2));
+  return set;
+}
+
+/** 兩句話是不是在講同一件事：雙字詞重疊比例（以短的那句為準） */
+function sameFact(a: string, b: string): boolean {
+  const x = bigrams(a), y = bigrams(b);
+  if (!x.size || !y.size) return a.trim() === b.trim();
+  let hit = 0;
+  for (const g of x) if (y.has(g)) hit++;
+  return hit / Math.min(x.size, y.size) >= 0.75;
+}
+
+function textHash(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
+  return (h >>> 0).toString(16);
+}
+
+function cosine(a: Float32Array, b: Float32Array): number {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  return na && nb ? dot / Math.sqrt(na * nb) : 0;
+}
+
+function semanticBoost(sim: number | undefined): number {
+  return sim != null && sim > SEM_MIN ? (sim - SEM_MIN) * SEM_W : 0;
+}
+
+/** 挑記憶用的文字：這則訊息加上它回覆的那則（「那第一天呢？」要靠被回覆的內容才知道在問什麼） */
+function memoryText(m: { text: string; meta: string | null }): string {
+  let quoted = "";
+  try {
+    quoted = m.meta ? String(JSON.parse(m.meta).reply?.text ?? "") : "";
+  } catch {}
+  return `${m.text} ${quoted.slice(0, 300)}`.trim();
+}
+
 /** 模型偶爾學對話紀錄的格式，回答開頭多一個「［爸爸］」，存檔前拿掉 */
 function stripSpeakerTag(text: string): string {
   return text.replace(/^\s*［[^］\n]{1,16}］\s*/, "");
@@ -258,6 +310,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       CREATE INDEX IF NOT EXISTS messages_ts ON messages(ts);
       CREATE TABLE IF NOT EXISTS photos (id TEXT PRIMARY KEY, ts INTEGER, author TEXT, mime TEXT, data BLOB);
       CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, category TEXT, content TEXT, author TEXT);
+      CREATE TABLE IF NOT EXISTS embeddings (kind TEXT, ref INTEGER, hash TEXT, vec BLOB, PRIMARY KEY (kind, ref));
       CREATE TABLE IF NOT EXISTS itinerary (date TEXT PRIMARY KEY, title TEXT, detail TEXT, status TEXT, updated_at INTEGER, updated_by TEXT);
       CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, date TEXT, description TEXT, amount REAL, currency TEXT, amount_jpy INTEGER, amount_twd INTEGER, payer TEXT, split_among TEXT, category TEXT, author TEXT);
       CREATE TABLE IF NOT EXISTS locations (name TEXT PRIMARY KEY, lat REAL, lon REAL, accuracy REAL, ts INTEGER);
@@ -1819,6 +1872,100 @@ ${transcript || "（今天群組沒什麼對話）"}`;
    * 自動回想：從「最近訊息視窗之外」的舊聊天裡，找出跟這次問題字詞重疊最多的訊息。
    * 用中文雙字詞比對，不需要向量資料庫；旅程期間訊息量不大，全掃也很快。
    */
+  // ================= 記憶多了只挑相關的：雙字詞＋語意向量（Workers AI bge-m3）＋最近記的＋待辦預訂 =================
+
+  private memQuery: { text: string; sims: Map<number, number> } | null = null;
+  private embedBusy = false;
+
+  private async embedTexts(texts: string[]): Promise<Float32Array[] | null> {
+    if (!texts.length) return [];
+    try {
+      const r = (await this.env.AI.run("@cf/baai/bge-m3" as any, { text: texts })) as { data?: number[][] };
+      const data = r?.data ?? [];
+      return data.length === texts.length ? data.map((v) => Float32Array.from(v)) : null;
+    } catch (e) {
+      console.error("embedding failed", String((e as Error)?.message ?? e).slice(0, 200));
+      return null;
+    }
+  }
+
+  /** 記憶的向量：新增、改過的才算，刪掉的順便清掉；一次最多 max 筆（Workers AI 不能用就等下次） */
+  private async syncEmbeddings(max = 60) {
+    if (this.embedBusy) return;
+    this.embedBusy = true;
+    try {
+      const have = new Map(this.sql.exec("SELECT ref, hash FROM embeddings WHERE kind = 'memory'").toArray().map((r) => [Number(r.ref), String(r.hash)]));
+      const src = this.memories().map((m) => {
+        const text = String(m.content).slice(0, 500);
+        return { ref: Number(m.id), text, hash: textHash(text) };
+      });
+      const live = new Set(src.map((x) => x.ref));
+      for (const ref of have.keys()) if (!live.has(ref)) this.sql.exec("DELETE FROM embeddings WHERE kind = 'memory' AND ref = ?", ref);
+      const todo = src.filter((x) => have.get(x.ref) !== x.hash).slice(0, max);
+      for (let i = 0; i < todo.length; i += 20) {
+        const batch = todo.slice(i, i + 20);
+        const vecs = await this.embedTexts(batch.map((b) => b.text));
+        if (!vecs) break;
+        batch.forEach((b, k) => this.sql.exec("INSERT OR REPLACE INTO embeddings (kind, ref, hash, vec) VALUES ('memory', ?, ?, ?)", b.ref, b.hash, vecs[k].buffer));
+      }
+    } catch (e) {
+      console.error("syncEmbeddings failed", e);
+    } finally {
+      this.embedBusy = false;
+    }
+  }
+
+  /** 記憶超過 40 條：先算好這次問題跟每條記憶的語意相似度；還沒算向量的在背景補 */
+  private async prepareMemoryQuery(text: string) {
+    this.memQuery = null;
+    if (!text.trim() || this.memories().length <= MEMORY_ALL) return;
+    this.ctx.waitUntil(this.syncEmbeddings(500));
+    const rows = this.sql.exec("SELECT ref, vec FROM embeddings WHERE kind = 'memory'").toArray();
+    if (!rows.length) return;
+    const q = (await this.embedTexts([text.slice(0, 500)]))?.[0];
+    if (!q) return;
+    this.memQuery = { text, sims: new Map(rows.map((r) => [Number(r.ref), cosine(q, new Float32Array(r.vec as ArrayBuffer))])) };
+  }
+
+  /** 記憶多了以後只挑跟這次問題相關的 25 條：雙字詞＋語意＋最近記的＋待辦、預訂 */
+  private relevantMemories(text: string): { list: Record<string, SqlStorageValue>[]; total: number } {
+    const all = this.memories();
+    if (all.length <= MEMORY_ALL) return { list: all, total: all.length };
+    const q = bigrams(text);
+    const sims = this.memQuery?.text === text ? this.memQuery.sims : null;
+    const scored = all.map((m, i) => {
+      const g = bigrams(String(m.content));
+      let hit = 0;
+      for (const x of q) if (g.has(x)) hit++;
+      const recent = i >= all.length - 8 ? 0.5 : 0;
+      const urgent = m.category === "待辦" || m.category === "預訂" ? 0.3 : 0;
+      return { m, score: (q.size ? hit / Math.sqrt(q.size) : 0) + recent + urgent + semanticBoost(sims?.get(Number(m.id))) };
+    });
+    const list = scored.sort((a, b) => b.score - a.score).slice(0, MEMORY_PICK).map((x) => x.m).sort((a, b) => Number(a.ts) - Number(b.ts));
+    return { list, total: all.length };
+  }
+
+  /** 整理記憶時給 AI 看的舊記憶：不多就全部；多了只給跟新對話有關的 50 條＋最近記的 20 條（它才抓得到重複和過時的） */
+  private memoriesFor(transcript: string): { list: Record<string, SqlStorageValue>[]; total: number } {
+    const all = this.memories();
+    if (all.length <= 70) return { list: all, total: all.length };
+    const t = bigrams(transcript);
+    const keep = new Set(
+      all
+        .map((m) => {
+          const g = bigrams(String(m.content));
+          let hit = 0;
+          for (const x of g) if (t.has(x)) hit++;
+          return { id: m.id, s: g.size ? hit / g.size : 0 };
+        })
+        .sort((a, b) => b.s - a.s)
+        .slice(0, 50)
+        .map((x) => x.id),
+    );
+    for (const m of all.slice(-20)) keep.add(m.id);
+    return { list: all.filter((m) => keep.has(m.id)), total: all.length };
+  }
+
   private recallOlder(trigger: MessageRow, windowStartTs: number): string {
     const grams = (s: string) => {
       const clean = s.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
@@ -1865,7 +2012,8 @@ ${transcript || "（今天群組沒什麼對話）"}`;
         return `- ${date.slice(5).replace("-", "/")}（${wd}）${d.title}${d.detail ? `｜${d.detail}` : ""}${d.status ? `｜${d.status}` : ""}`;
       })
       .join("\n");
-    const mems = this.memories().map((m) => `- #${m.id}［${m.category}］${m.content}（${m.author}）`).join("\n") || "（目前沒有）";
+    const picked = this.relevantMemories(trigger ? memoryText(trigger) : "");
+    const mems = picked.list.map((m) => `- #${m.id}［${m.category}］${m.content}（${m.author}）`).join("\n") || "（目前沒有）";
     const locs = this.memberLocation()
       .map((l) => `- ${l.name}：${l.area ? `${l.area}附近` : "地名查詢中"}（${l.lat.toFixed(5)},${l.lon.toFixed(5)}，${Math.round((Date.now() - l.ts) / 60000)} 分鐘前）`)
       .join("\n");
@@ -1908,7 +2056,7 @@ ${TRIP.airportRoutes}
 # 最新行程（以這裡為準）
 ${itin}
 
-# 長期記憶（成員偏好、決定、預訂…，#編號可用 forget 刪除）
+# 長期記憶（成員偏好、決定、預訂…，#編號可用 forget 刪除）${picked.list.length < picked.total ? `\n（共 ${picked.total} 條，這裡只列出跟這次對話最相關的；找不到就用 search_history）` : ""}
 ${mems}
 ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以前聊過、和這次問題相關的內容（依時間排序）\n${recall}\n` : ""}${locs ? `\n# 成員最近位置\n${locs}\n` : ""}${translations ? `\n# 最近在翻譯頁翻過的句子（成員問「剛剛跟店員說了什麼」時參考）\n${translations}\n` : ""}${cards ? `\n# 最近的確認卡片（等待確認的還沒寫入；要修改就重新呼叫同一個工具，replaces 填編號）\n${cards}\n` : ""}
 # 回答規則
@@ -2007,6 +2155,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
     // 附了位置就先把地名查好，AI 才不會自己猜在哪裡
     if (trigger.lat != null) await this.ensureArea(trigger.author);
     const history = this.recentMessages(HISTORY_WINDOW);
+    await this.prepareMemoryQuery(memoryText(trigger));
     const system = this.systemPrompt(trigger, history[0]?.ts ?? trigger.ts);
     const images: AttachedImage[] = [];
     const toolsUsed: string[] = [];
@@ -2238,7 +2387,8 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       .slice(-80)
       .map((m) => `${m.role === "assistant" ? AI_NAME : m.author}：${m.text.slice(0, 500)}`)
       .join("\n");
-    const existing = this.memories().map((m) => `#${m.id}［${m.category}］${m.content}`).join("\n") || "（無）";
+    const shown = this.memoriesFor(transcript);
+    const existing = shown.list.map((m) => `#${m.id}［${m.category}］${m.content}`).join("\n") || "（無）";
     const prompt = `以下是家庭旅遊群組最新的對話，請整理群組的長期記憶：
 1. summary：把「舊摘要」與新對話合併成新的「整趟旅程對話摘要」（400 字內；保留每個人的偏好、做過的決定、討論過的店家與地點、待辦、重要資訊）。
 2. memories：萃取新對話中「之後還會用到」且「不在現有記憶裡」的事實，每條一句話、寫清楚是誰。
@@ -2249,7 +2399,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 舊摘要：
 ${this.setting("summary") || "（無）"}
 
-現有記憶：
+現有記憶${shown.list.length < shown.total ? `（共 ${shown.total} 條，這裡只列出跟新對話有關的 ${shown.list.length} 條；remove_ids 只能從這些裡面挑）` : ""}：
 ${existing}
 
 新對話：
@@ -2273,10 +2423,16 @@ ${transcript}
           for (const id of (json.remove_ids ?? []).slice(0, 20)) {
             if (Number.isInteger(Number(id))) this.sql.exec("DELETE FROM memories WHERE id = ?", Number(id));
           }
+          // 跟現有的某條講同一件事就不再記（模型常把記過的換句話說再記一次，記憶才會一直變多）
+          const known = this.memories().map((x) => String(x.content));
           for (const m of (json.memories ?? []).slice(0, 20)) {
-            if (m?.content) this.addMemory(String(m.content), String(m.category || "資訊"), "AI 自動整理");
+            const content = String(m?.content ?? "").trim();
+            if (!content || known.some((x) => sameFact(x, content))) continue;
+            this.addMemory(content, String(m.category || "資訊"), "AI 自動整理");
+            known.push(content);
           }
           this.setSetting("memory_cursor", String(fresh[fresh.length - 1].ts));
+          this.ctx.waitUntil(this.syncEmbeddings(500));
           this.broadcastState();
           return;
         } catch (e) {
