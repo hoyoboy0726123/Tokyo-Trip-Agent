@@ -246,6 +246,12 @@ const ROUTE_VERIFY = new RegExp(`幾站|站數|${CHECK_WORD}.{0,20}${ROUTE_WORD}
 const ROUTE_ASK = /(怎麼|如何).{0,8}(去|到|搭|坐|走)|交通|路線|轉乘|換車|幾站|(搭|坐).{0,6}(線|車)|地鐵|捷運|電車|JR|新幹線|巴士|公車/;
 const BACKUP_ROUTE_NOTE = "⚠️ 這次由備援模型回答，路線的方向和轉乘可能不準，出發前請以 Google 地圖為準。";
 
+/** 憑記憶回答的路線：回答下方放查證按鈕，按了才去找路線圖（送出的問題帶著原本的問題，放久了再按也查得對） */
+function routeCheckButton(question: string) {
+  const q = question.replace(/@(ai|AI|旅伴|助理|小幫手)\s*/g, "").replace(/\s+/g, " ").trim().slice(0, 60);
+  return { hint: "路線是 AI 憑記憶回答的，可能有錯", buttons: [{ label: "🗺️ 上網找路線圖查證", text: `幫我上網找官方地鐵路線圖，查證「${q}」的路線對不對` }] };
+}
+
 /** 沒附任何圖時，拿掉「依據…路線圖」「已附在下方」這類說法（模型會學前面查證過的回答） */
 const MAP_CLAIM = /路線圖.{0,20}(已附|附在下方|附圖)|依據[:：]?.{0,20}路線圖/;
 function dropMapClaims(text: string): string {
@@ -2372,7 +2378,12 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
           if (step === MAX_STEPS - 1) finalText = res.text || "（查了很多資料，但還沒整理完，請再問一次更具體的問題 🙏）";
         }
         if (!images.length) finalText = dropMapClaims(finalText);
-        if (provider.id === "workers-ai" && ROUTE_ASK.test(trigger.text) && /線|轉乘|方向|站/.test(finalText)) finalText = `${finalText.trim()}\n\n${BACKUP_ROUTE_NOTE}`;
+        if (provider.id === "workers-ai" && !toolsUsed.includes("check_route_map") && ROUTE_ASK.test(trigger.text) && /線|轉乘|方向|站/.test(finalText)) finalText = `${finalText.trim()}\n\n${BACKUP_ROUTE_NOTE}`;
+        // 憑記憶回答的路線：下方放查證按鈕（已經查證過、問延誤的不用）
+        const quick =
+          !toolsUsed.includes("check_route_map") && !trigger.photo_id && ROUTE_ASK.test(trigger.text) && !/延誤|停駛|誤點|運行/.test(trigger.text) && /線|轉乘|方向|站/.test(finalText)
+            ? routeCheckButton(trigger.text)
+            : null;
         if (!finalText.trim()) finalText = images.length ? "幫你找到這些圖片 👇（網路圖片，僅供參考）" : "嗯…我沒有想到好的回答，可以換個方式問我嗎？";
         const row = this.insertMessage({
           id, author: AI_NAME, role: "assistant", text: fixMapLinks(stripSpeakerTag(finalText), this.mapFix()), photo_id: null, lat: null, lon: null,
@@ -2382,6 +2393,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
             provider: provider.id, model: provider.model, tools: [...new Set(toolsUsed)].map(toolLabel),
             ...(images.length ? { images } : {}),
             ...(drafts.length ? { drafts } : {}),
+            ...(quick ? { quick } : {}),
           }),
         });
         this.broadcast({ type: "ai_done", id, message: this.publicMessage(row) });

@@ -192,6 +192,11 @@ input, textarea, select { font: inherit; color: inherit; }
 .draft-actions button.ok { flex: 2; background: var(--red); border-color: transparent; color: #fff; }
 .draft-actions button:disabled { opacity: .5; }
 .draft-state { font-size: 13px; font-weight: 700; color: var(--muted); }
+/* 回答下方的快速按鈕：例如「上網找路線圖查證」 */
+.quick { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 0; }
+.quick-hint { width: 100%; font-size: 12px; color: var(--muted); }
+.quick button { border: 1px solid var(--red-ink); border-radius: 999px; background: var(--card); color: var(--red-ink); font: inherit; font-size: 13px; font-weight: 700; padding: 5px 12px; }
+.quick button:disabled { opacity: .5; }
 .typing span { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); margin: 0 2px; animation: blink 1.2s infinite both; }
 .typing span:nth-child(2) { animation-delay: .2s; }
 .typing span:nth-child(3) { animation-delay: .4s; }

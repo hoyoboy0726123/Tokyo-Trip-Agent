@@ -354,6 +354,7 @@ function messageNode(msg) {
         <span class="ai-time">${timeText(msg.ts)}${provider ? ` · ${provider}` : ""}</span></div>
       <div class="ai-body rich">${body}</div>
       ${(msg.drafts ?? []).map(draftHtml).join("")}
+      ${quickHtml(msg.meta?.quick)}
       ${actions}
     </div>`;
   } else if (isMe) {
@@ -364,6 +365,14 @@ function messageNode(msg) {
   }
   node.querySelectorAll("img.photo").forEach((img) => img.addEventListener("click", () => openViewer(img.src)));
   return node;
+}
+
+/** 回答下方的快速按鈕（例如「上網找路線圖查證」）：按了就回覆這則回答、送出寫好的問題 */
+function quickHtml(q) {
+  if (!q?.buttons?.length) return "";
+  return `<div class="quick">${q.hint ? `<span class="quick-hint">${escapeHtml(q.hint)}</span>` : ""}${q.buttons
+    .map((b) => `<button type="button" data-quick="${escapeHtml(b.text)}">${escapeHtml(b.label)}</button>`)
+    .join("")}</div>`;
 }
 
 // ---------- 確認卡片：AI 要記帳、改行程、刪除時，先列出內容，成員按確認才寫入 ----------
@@ -407,6 +416,14 @@ document.addEventListener("visibilitychange", () => {
 // ---------- 複製與置頂 ----------
 
 els.messages.addEventListener("click", (e) => {
+  const qb = e.target.closest("[data-quick]");
+  if (qb) {
+    if (wsSend({ type: "send", text: qb.dataset.quick, replyTo: qb.closest(".msg").dataset.id })) {
+      qb.disabled = true;
+      qb.textContent = "✓ 已送出";
+    }
+    return;
+  }
   const btn = e.target.closest("[data-act]");
   if (btn) {
     const msgEl = btn.closest(".msg");
