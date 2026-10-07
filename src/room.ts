@@ -265,6 +265,9 @@ function videoButton(question: string) {
   return { buttons: [{ label: "🎬 找相關短片", text: `幫我找剛才介紹的地點的 IG、YouTube 短片（原本的問題：「${q}」）` }] };
 }
 
+/** 成員有要看圖（照片、長怎樣、路線圖…）：沒有的話 AI 自己呼叫 find_images 就跳過 */
+const IMAGE_ASK = /照片|圖片|相片|看圖|附圖|長什麼樣|長怎樣|樣子|外觀|看看|路線圖|地鐵圖|捷運圖|平面圖|示意圖|菜單|(傳|給|找|看).{0,6}圖(?!書)|photo|picture|image/i;
+
 /** 成員要中文的影片（台灣人拍的、聽得懂的）：find_short_videos 一定用 language=chinese */
 const CHINESE_ASK = /中文|華語|國語|台灣|臺灣|聽得懂/;
 function chineseButton(places: string[]) {
@@ -272,6 +275,13 @@ function chineseButton(places: string[]) {
   return {
     buttons: [{ label: "🗣️ 改找中文介紹的", text: names.length ? `幫我改找「${names.join("」「")}」的中文介紹影片` : "幫我改找中文介紹的影片（剛才那些地點）" }],
   };
+}
+
+/** 地圖連結的座標不是工具查到的（模型自己編的座標會指到錯的地方）：改成用連結文字的店名搜尋 */
+function dropFakeCoords(text: string, known: string): string {
+  return text.replace(/\[([^\]\n]*)\]\((https:\/\/www\.google\.com\/maps\/search\/\?api=1&query=(-?\d{1,3}\.\d{3,})(?:%2C|,)(-?\d{1,3}\.\d{3,}))\)/gi, (all, label: string, _url: string, lat: string, lon: string) =>
+    known.includes(lat) && known.includes(lon) ? all : `[${label}](map)`,
+  );
 }
 
 /** 模型自己寫的 IG／YouTube／TikTok 網址常是編的：不是工具找到的就拿掉（連結文字留著） */
@@ -2219,7 +2229,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 要看「大家自己拍、傳到聊天室的照片」（第一天的照片、我們在某地的合照、某人傳的照片、昨天吃的拉麵）→ find_chat_photos（「第一天」「昨天」換算成日期，內容寫進 keyword），照片會顯示在回答下方，不是網路圖片；沒找到就照實說，不要拿網路圖片代替。
 - 你可以用 find_images 把網路上的圖片直接顯示給成員（照片、捷運／地鐵路線圖、平面圖、菜單…），絕對不要說「無法傳送圖片」。
 - 成員要求看網路上的照片／圖片／路線圖時，一定要用 find_images（店名或景點名稱加地名；好幾個地方就放進 queries 一次查完）；圖片會自動顯示在回答下方。絕對不要自己產生圖片網址或 Google 圖片搜尋連結，並提醒是網路圖片、僅供參考。沒有要求就不要找圖片。
-- 成員想看任何地點、店家、美食、景點的影片或實際畫面時，不管怎麼說（短片、影片、Reels、YouTube、有人拍嗎、想看看長怎樣、好啊找找看…），都用 find_short_videos 去找（places 填當地語言名稱、中文名稱、地區、類別、keywords），影片卡片會自動顯示在回答下方；不要沒查就叫成員自己去 IG 或 YouTube 搜尋，也絕對不要自己寫 IG、YouTube、TikTok 的影片網址。預設找當地語言的；成員想看中文介紹的（台灣人拍的、聽得懂的），language 填 chinese 再找一次。
+- 成員想看任何地點、店家、美食、景點的影片或實際畫面時，不管怎麼說（短片、影片、Reels、YouTube、有人拍嗎、想看看長怎樣、好啊找找看…），都用 find_short_videos 去找（places 填當地語言名稱、中文名稱、地區、類別、keywords），影片卡片會自動顯示在回答下方；不要沒查就叫成員自己去 IG 或 YouTube 搜尋，也絕對不要自己寫 IG、YouTube、TikTok 的影片網址；成員沒要看影片就不要主動找（回答下方會有找短片的按鈕）。預設找當地語言的；成員想看中文介紹的（台灣人拍的、聽得懂的），language 填 chinese 再找一次。
 - 問「我附近有什麼」：直接用 find_nearby，near 留空（系統會自動用發問者的 GPS），回答時列出實際店名、距離、步行分鐘與地圖連結，不要只給「附近有很多」這種泛泛建議；需要評價再用 web_search 補充。問「某個地方附近有什麼」（例如龜有公園附近），也要用 find_nearby，near 填日文地名（亀有公園）。問「我在哪」用 get_member_locations，說出區域與最近的車站。
 - 迪士尼當天問排隊，用 disney_wait_times。
 - 問電車有沒有延誤、停駛 → train_status；問計程車多少錢、要多久 → taxi_fare；問地震、颱風、天氣會不會影響行程 → japan_alerts。
@@ -2404,6 +2414,11 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
           for (const c of res.calls) modelParts.push({ call: c });
           const resultParts: Part[] = [];
           for (const c of res.calls) {
+            // 成員沒要求看圖：AI 自己找圖片只會拖慢、用掉額度，跳過
+            if (c.name === "find_images" && !IMAGE_ASK.test(trigger.text)) {
+              resultParts.push({ result: { id: c.id, name: c.name, response: { skipped: true, note: "成員沒有要求看圖片，這次不找圖片，直接用文字回答" } } });
+              continue;
+            }
             toolsUsed.push(c.name);
             this.broadcast({ type: "ai_tool", id, name: c.name, label: toolLabel(c.name), args: c.args });
             if (c.name === "find_short_videos") {
@@ -2411,7 +2426,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
               for (const p of Array.isArray(c.args.places) ? (c.args.places as any[]) : []) videoPlaces.push(String(p?.name_zh || p?.name_local || "").slice(0, 30));
             }
             const result = await runTool(c.name, c.args, {
-              env: this.env, room: this, author: user.name, photoId: trigger.photo_id,
+              env: this.env, room: this, author: user.name, photoId: trigger.photo_id, question: trigger.text,
               attachImage: (img) => images.length < 8 && images.push(img),
               propose,
             });
@@ -2433,6 +2448,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
                 ? chineseButton(videoPlaces)
                 : null;
         finalText = dropFakeVideoLinks(finalText, toolJson + images.map((im) => im.page ?? "").join(" "));
+        finalText = dropFakeCoords(finalText, toolJson);
         if (!finalText.trim()) finalText = images.length ? "幫你找到這些圖片 👇（網路圖片，僅供參考）" : "嗯…我沒有想到好的回答，可以換個方式問我嗎？";
         const row = this.insertMessage({
           id, author: AI_NAME, role: "assistant", text: fixMapLinks(stripSpeakerTag(finalText), this.mapFix()), photo_id: null, lat: null, lon: null,
@@ -2473,7 +2489,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
     id: string, images: AttachedImage[], toolsUsed: string[], image: Part | null, propose: (d: DraftInput) => unknown,
   ): Promise<string | null> {
     const ctx = {
-      env: this.env, room: this, author: user.name, photoId: trigger.photo_id,
+      env: this.env, room: this, author: user.name, photoId: trigger.photo_id, question: trigger.text,
       attachImage: (img: AttachedImage) => images.length < 8 && images.push(img),
       propose,
     };

@@ -75,6 +75,8 @@ export interface ToolContext {
   env: Env;
   room: RoomApi;
   author: string;
+  /** 發問者這則訊息的文字（找附近要分辨地點是成員自己講的、還是 AI 自己填的） */
+  question?: string;
   /** 發問者這則訊息附的照片（存票券、讀收據用） */
   photoId?: string | null;
   /** 工具找到的圖片，會附在這次 AI 回答下方 */
@@ -335,6 +337,9 @@ async function tavilyVideos(key: string, query: string, domains: string[]) {
 /** 中文說明（繁體、簡體都算）：中文常用字比平假名多（日本人寫的說明平假名很多；店名的片假名不算） */
 const zhCaption = (t: string) => (t.match(/[的是我們们這这很超吃喝好推薦荐必在了嗎吗吧呢也都就還还真]/g) ?? []).length > (t.match(/[\u3041-\u309f]/g) ?? []).length;
 
+/** 只是料理或類別、不是店名（「池袋串燒」的「串燒」） */
+const GENERIC_FOOD = /^(串燒|串焼き?|焼き?鳥|燒鳥|やきとり|居酒屋|美食|グルメ|拉麵|拉面|ラーメン|燒肉|烤肉|焼肉|壽司|寿司|すし|咖啡|カフェ|甜點|スイーツ|餐廳|レストラン|맛집|小吃|夜景|景點|觀光|購物|逛街|美食街|食べ歩き)$/;
+
 type ShortPlace = { name_local: string; name_zh: string; area: string; category: string; keywords: string[] };
 
 /** 一個地點的短片：IG、YouTube 同時查；過濾掉不是單支影片、跟地點無關、已刪除的；IG 最多 3 支、YouTube 最多 2 支，合計 4 支 */
@@ -345,9 +350,12 @@ async function placeVideos(key: string, country: string, p: ShortPlace, lang: "l
   // 店名或景點名本身要出現在影片說明裡：用 AI 給的 keywords；沒有就從名稱去掉地區和分店（「池袋店」「駅前店」）
   const branch = /(店|駅|站|역|점|口|前)$/;
   const tokens = [p.name_local, p.name_zh].flatMap((n) => n.split(/[\s　]+/)).filter((t) => t && !(p.area && t.includes(p.area)) && !branch.test(t));
-  const cores = (p.keywords.length ? p.keywords : tokens).map(textKey).filter((n) => n.length >= 2);
-  const relevant = (t: string) => cores.some((c) => textKey(t).includes(c));
+  const names = (p.keywords.length ? p.keywords : tokens).map((k) => (p.area ? k.split(p.area).join("").trim() : k) || k);
+  const cores = names.map(textKey).filter((n) => n.length >= 2);
   const inArea = (t: string) => !!p.area && textKey(t).includes(textKey(p.area));
+  // 「池袋串燒」這種泛稱（只有料理或類別、沒有店名）：影片也要提到地區，不然會找到別的城市，甚至「金曲串燒」這種歌
+  const generic = names.length > 0 && names.every((n) => GENERIC_FOOD.test(n.replace(/\s+/g, "")));
+  const relevant = (t: string) => cores.some((c) => textKey(t).includes(c)) && (!generic || !p.area || inArea(t));
   const seen = new Set<string>();
   // IG 只限 /reel 路徑才不會混進圖文貼文；YouTube 只限網域（限定 /shorts 反而不準）
   const collect = async (igQuery: string, ytQuery: string) => {
@@ -687,6 +695,15 @@ const CUISINE: [RegExp, RegExp][] = [
   [/カフェ|咖啡|cafe|coffee/i, /coffee|cafe/],
   [/ハンバーガー|漢堡|burger/i, /burger/],
   [/ピザ|披薩|pizza/i, /pizza/],
+  [/串カツ|串炸|炸串|kushikatsu/i, /kushikatsu|kushiage/],
+  [/串燒|串焼|焼き?鳥|燒鳥|烤雞肉串|やきとり|yakitori|kushiyaki/i, /yakitori|kushiyaki|skewer/],
+  [/居酒屋|酒場|izakaya/i, /izakaya/],
+  [/お好み焼き|大阪燒|okonomiyaki/i, /okonomiyaki/],
+  [/たこ焼き|章魚燒|章魚小丸子|takoyaki/i, /takoyaki/],
+  [/餃子|煎餃|gyoza/i, /gyoza|dumpling/],
+  [/中華|中式|中國菜|chinese/i, /chinese/],
+  [/韓式|韓國|韓国|korean/i, /korean/],
+  [/甜點|スイーツ|ケーキ|蛋糕|dessert|cake/i, /cake|dessert|confectionery/],
 ];
 
 // ---------------- 附近地點（OpenStreetMap Overpass） ----------------
@@ -975,13 +992,15 @@ export const TOOLS: Tool[] = [
         required: ["category"],
       },
     },
-    async run(args, { room, author }) {
+    async run(args, { room, author, question }) {
       const mine = recentLocation(room, author);
       let center: { lat: number; lon: number; label: string } | null = null;
       let note = "";
-      // AI 常把發問者自己的地名填進 near，這時直接用 GPS 比較準
+      // AI 常把發問者自己的地名填進 near，這時直接用 GPS 比較準；但成員自己講出來的地點（「池袋地鐵站附近」）就照那個地點查
       const near = String(args.near ?? "").trim();
-      const isMyArea = !!near && !!mine?.area && (mine.area.includes(near) || near.includes(mine.area));
+      const nk = (s: string) => [...s.normalize("NFKC")].map((c) => KANJI[c] ?? c).join("").replace(/\s+/g, "");
+      const named = !!near && nk(question ?? "").includes(nk(near.replace(/(駅前|駅|站|周辺|附近)$/, "")));
+      const isMyArea = !!near && !named && !!mine?.area && (mine.area.includes(near) || near.includes(mine.area));
       if (near && !isMyArea) {
         const g = await locate(near);
         if (g) center = { lat: g.lat, lon: g.lon, label: COORD_RE.test(String(args.near)) ? "指定座標" : g.name };
@@ -1024,9 +1043,13 @@ export const TOOLS: Tool[] = [
         })
         .sort((a: any, b: any) => a.distance_m - b.distance_m);
       const kw = kwRaw;
-      const cuisine = CUISINE.find(([re]) => re.test(kw))?.[1];
+      // 料理名稱有好幾種寫法（串燒＝焼き鳥＝やきとり），店名和 OSM 的料理類型都用同一組比對
+      const dish = CUISINE.find(([re]) => re.test(kw));
       let places = kw
-        ? all.filter((p: any) => `${p.name} ${p.name_ja ?? ""}`.toLowerCase().includes(kw.toLowerCase()) || (cuisine && cuisine.test(p.cuisine ?? "")))
+        ? all.filter((p: any) => {
+            const name = `${p.name} ${p.name_ja ?? ""}`;
+            return name.toLowerCase().includes(kw.toLowerCase()) || (!!dish && (dish[1].test(p.cuisine ?? "") || dish[0].test(name)));
+          })
         : all;
       if (kw && !places.length) {
         note = [note, `半徑 ${r} 公尺內沒有符合「${kw}」的店家資料，以下是附近所有結果；可加大 radius_m 再找，或用 web_search 補充`].filter(Boolean).join("；");
