@@ -102,7 +102,7 @@ const INTENTS: { tool: string; test: (text: string, hasPhoto: boolean) => boolea
   // 問幾站、要查證確認路線：找路線圖（官方優先）照圖回答
   { tool: "check_route_map", test: (t, p) => !p && ROUTE_VERIFY.test(t) && !/延誤|停駛|誤點|運行|計程車|taxi|uber|走路|步行/i.test(t) },
   // 要看 IG／YouTube 短片介紹
-  { tool: "find_short_videos", test: (t, p) => !p && /短片|短影音|reels?\b|shorts|(找|看|有沒有|推薦).{0,8}(影片|視頻)|youtube|\big\b.{0,6}(影片|介紹|推薦)/i.test(t) },
+  { tool: "find_short_videos", test: (t, p) => !p && /短片|短影音|reels?\b|shorts|(找|看|有沒有|推薦).{0,20}(影片|視頻)|youtube|\big\b.{0,6}(影片|介紹|推薦)/i.test(t) },
   // 「路線圖」「傳圖給我」也算要看圖；自己附了照片時是要 AI 看那張照片，不是上網找圖
   { tool: "find_chat_photos", test: (t, p) => !p && OWN_PHOTO.test(t) && !/長什麼樣|網路|網上|存成|票券/.test(t), alt: ["find_images", "find_documents"] },
   { tool: "find_images", test: (t, p) => !p && /照片|圖片|相片|看圖|附圖|長什麼樣|路線圖|地鐵圖|捷運圖|平面圖|示意圖|菜單圖|(傳|給|找|看).{0,6}圖(?!書)|photo|picture|image/i.test(t) && !/存|票券|地圖/.test(t) && !OWN_PHOTO.test(t), alt: ["find_chat_photos", "check_route_map"] },
@@ -254,8 +254,12 @@ function routeCheckButton(question: string) {
   return { hint: "路線是 AI 憑記憶回答的，可能有錯", buttons: [{ label: "🗺️ 上網找路線圖查證", text: `幫我上網找官方地鐵路線圖，查證「${q}」的路線對不對` }] };
 }
 
-/** 問景點、美食、餐廳：回答下方放「找相關短片」按鈕 */
-const PLACE_ASK = /好吃|美食|餐廳|吃什麼|吃哪|拉麵|燒肉|壽司|咖啡|甜點|小吃|景點|好玩|推薦|必去|必吃|必逛|逛街|夜市|市場|商圈|神社|寺|公園|博物館|美術館|樂園|展望台|晴空塔|迪士尼|值得去/;
+/** 問景點、美食、餐廳：回答下方放「找相關短片」按鈕（關鍵字沒中、AI 自己判斷要查時，find_short_videos 照樣能用） */
+const PLACE_ASK = /好吃|美食|餐廳|吃|喝|拉麵|燒肉|串燒|燒鳥|居酒屋|燒烤|火鍋|壽司|丼|定食|早餐|午餐|晚餐|宵夜|咖啡|甜點|小吃|酒吧|景點|好玩|推薦|必去|必逛|逛街|購物|百貨|伴手禮|夜市|市場|商圈|神社|寺|公園|博物館|美術館|樂園|展望台|晴空塔|迪士尼|值得去/;
+/** 回答說找了影片、或叫成員自己去搜影片，卻沒呼叫 find_short_videos：提醒它真的去找（不管成員怎麼問） */
+const VIDEO_CLAIM = /(找|搜尋|搜|查|看|整理|附上|提供).{0,15}(影片|短片|shorts|reels)|(影片|短片|shorts|reels).{0,10}(如下|在下方|附在|供您|給您|參考)/i;
+/** 回答裡推薦了地點（地圖連結）：2 個以上就算在介紹地方，也放「找相關短片」按鈕 */
+const PLACE_LINK = /\[📍[^\]\n]+\]\((?:map\b|https:\/\/www\.google\.com\/maps\/search)/g;
 function videoButton(question: string) {
   const q = question.replace(/@(ai|AI|旅伴|助理|小幫手)\s*/g, "").replace(/\s+/g, " ").trim().slice(0, 60);
   return { buttons: [{ label: "🎬 找相關短片", text: `幫我找剛才介紹的地點的 IG、YouTube 短片（原本的問題：「${q}」）` }] };
@@ -2206,7 +2210,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 要看「大家自己拍、傳到聊天室的照片」（第一天的照片、我們在某地的合照、某人傳的照片、昨天吃的拉麵）→ find_chat_photos（「第一天」「昨天」換算成日期，內容寫進 keyword），照片會顯示在回答下方，不是網路圖片；沒找到就照實說，不要拿網路圖片代替。
 - 你可以用 find_images 把網路上的圖片直接顯示給成員（照片、捷運／地鐵路線圖、平面圖、菜單…），絕對不要說「無法傳送圖片」。
 - 成員要求看網路上的照片／圖片／路線圖時，一定要用 find_images（店名或景點名稱加地名；好幾個地方就放進 queries 一次查完）；圖片會自動顯示在回答下方。絕對不要自己產生圖片網址或 Google 圖片搜尋連結，並提醒是網路圖片、僅供參考。沒有要求就不要找圖片。
-- 成員想看景點、美食、餐廳的短片介紹（IG Reels、YouTube Shorts）時用 find_short_videos（places 填當地語言名稱、中文名稱、地區、類別），影片卡片會自動顯示在回答下方；絕對不要自己寫 IG、YouTube、TikTok 的影片網址。
+- 成員想看任何地點、店家、美食、景點的影片或實際畫面時，不管怎麼說（短片、影片、Reels、YouTube、有人拍嗎、想看看長怎樣、好啊找找看…），都用 find_short_videos 去找（places 填當地語言名稱、中文名稱、地區、類別、keywords），影片卡片會自動顯示在回答下方；不要沒查就叫成員自己去 IG 或 YouTube 搜尋，也絕對不要自己寫 IG、YouTube、TikTok 的影片網址。
 - 問「我附近有什麼」：直接用 find_nearby，near 留空（系統會自動用發問者的 GPS），回答時列出實際店名、距離、步行分鐘與地圖連結，不要只給「附近有很多」這種泛泛建議；需要評價再用 web_search 補充。問「某個地方附近有什麼」（例如龜有公園附近），也要用 find_nearby，near 填日文地名（亀有公園）。問「我在哪」用 get_member_locations，說出區域與最近的車站。
 - 迪士尼當天問排隊，用 disney_wait_times。
 - 問電車有沒有延誤、停駛 → train_status；問計程車多少錢、要多久 → taxi_fare；問地震、颱風、天氣會不會影響行程 → japan_alerts。
@@ -2329,6 +2333,8 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
           if (!res.calls.length) {
             // 模型偶爾偷懶：嘴上說「已加入清單」「圖片在下方」卻沒呼叫工具。提醒一次，重新回答
             let need = requiredTool(trigger.text, toolsUsed, !!trigger.photo_id);
+            // 嘴上說找了影片（或叫成員自己去搜影片）卻沒呼叫工具：關鍵字沒中也要它真的去找
+            if (!need && !toolsUsed.includes("find_short_videos") && VIDEO_CLAIM.test(res.text)) need = "find_short_videos";
             // 要寫入資料的工具：AI 正在反問成員（日期不在旅遊期間、金額看不清…）就讓它問，不要蓋掉硬寫
             if (need && DRAFT_TOOLS.has(need) && isAskingBack(res.text)) need = null;
             if (need && !nudged.has(need) && step < MAX_STEPS - 1) {
@@ -2406,7 +2412,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
         const quick =
           !toolsUsed.includes("check_route_map") && !trigger.photo_id && ROUTE_ASK.test(trigger.text) && !/延誤|停駛|誤點|運行/.test(trigger.text) && /線|轉乘|方向|站/.test(finalText)
             ? routeCheckButton(trigger.text)
-            : !toolsUsed.includes("find_short_videos") && !trigger.photo_id && PLACE_ASK.test(trigger.text) && finalText.length > 80
+            : !toolsUsed.includes("find_short_videos") && !trigger.photo_id && finalText.length > 80 && (PLACE_ASK.test(trigger.text) || (finalText.match(PLACE_LINK) ?? []).length >= 2)
               ? videoButton(trigger.text)
               : null;
         finalText = dropFakeVideoLinks(finalText, toolJson + images.map((im) => im.page ?? "").join(" "));

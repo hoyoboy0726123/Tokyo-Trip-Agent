@@ -268,17 +268,20 @@ async function imageUsable(url: string): Promise<boolean> {
 /** /api/img 轉送的上限：超過就顯示不出來 */
 const ROUTE_MAP_MAX = 5_000_000;
 /** 短片網址整理成固定格式（IG Reels、YouTube Shorts）；個人頁、標籤頁這類不是單支影片的回 null */
-function videoOf(u: string): { platform: "Instagram" | "YouTube"; url: string; id: string } | null {
+function videoOf(u: string): { platform: "Instagram" | "YouTube"; url: string; id: string; short: boolean } | null {
   try {
     const x = new URL(u);
     const host = x.hostname.replace(/^(www|m)\./, "");
     if (host === "instagram.com") {
       const m = x.pathname.match(/^\/(?:[\w.]+\/)?(reels?|p)\/([\w-]{5,})/);
-      return m ? { platform: "Instagram", url: `https://www.instagram.com/${m[1] === "p" ? "p" : "reel"}/${m[2]}/`, id: m[2] } : null;
+      return m ? { platform: "Instagram", url: `https://www.instagram.com/${m[1] === "p" ? "p" : "reel"}/${m[2]}/`, id: m[2], short: m[1] !== "p" } : null;
     }
-    if (host === "youtube.com") {
+    if (host === "youtube.com" || host === "youtu.be") {
       const m = x.pathname.match(/\/shorts\/([\w-]{11})/) ?? x.pathname.match(/\/source\/([\w-]{11})\/shorts/);
-      return m ? { platform: "YouTube", url: `https://www.youtube.com/shorts/${m[1]}`, id: m[1] } : null;
+      if (m) return { platform: "YouTube", url: `https://www.youtube.com/shorts/${m[1]}`, id: m[1], short: true };
+      // 一般影片也收（Shorts 排前面）：介紹店家的常是一般長度的影片
+      const id = host === "youtu.be" ? x.pathname.slice(1, 12) : x.pathname === "/watch" ? (x.searchParams.get("v") ?? "") : "";
+      return /^[\w-]{11}$/.test(id) ? { platform: "YouTube", url: `https://www.youtube.com/watch?v=${id}`, id, short: false } : null;
     }
   } catch {}
   return null;
@@ -310,8 +313,8 @@ async function checkVideo(v: { platform: string; url: string; id: string }): Pro
   }
 }
 
-/** 文字比對用：繁體／日文漢字、全半形、大小寫都算一樣 */
-const textKey = (s: unknown) => [...String(s ?? "").normalize("NFKC")].map((c) => KANJI[c] ?? c).join("").toLowerCase().replace(/\s+/g, "");
+/** 文字比對用：繁體／日文漢字、全半形、大小寫、撇號和點（T's／T’s）都算一樣 */
+const textKey = (s: unknown) => [...String(s ?? "").normalize("NFKC")].map((c) => KANJI[c] ?? c).join("").toLowerCase().replace(/[\s'’‘`´・·.\-_]+/g, "");
 
 async function tavilyVideos(key: string, query: string, domains: string[]) {
   try {
@@ -335,11 +338,6 @@ type ShortPlace = { name_local: string; name_zh: string; area: string; category:
 async function placeVideos(key: string, country: string, p: ShortPlace) {
   const reel = /韓/.test(country) ? "릴스" : /日本/.test(country) ? "リール" : "reels";
   const withArea = (name: string) => [name, p.area && !name.includes(p.area) ? p.area : ""].filter(Boolean).join(" ");
-  const [ig, yt] = await Promise.all([
-    // IG 用當地語言＋地區＋類別找（限定 /reel 路徑才不會混進圖文貼文）；YouTube 用中文找，只限網域（限定 /shorts 反而不準）
-    tavilyVideos(key, `${withArea(p.name_local)} ${p.category} ${reel}`.replace(/\s+/g, " "), ["instagram.com/reel"]),
-    tavilyVideos(key, `${withArea(p.name_zh || p.name_local)} shorts`, ["youtube.com"]),
-  ]);
   // 店名或景點名本身要出現在影片說明裡：用 AI 給的 keywords；沒有就從名稱去掉地區和分店（「池袋店」「駅前店」）
   const branch = /(店|駅|站|역|점|口|前)$/;
   const tokens = [p.name_local, p.name_zh].flatMap((n) => n.split(/[\s　]+/)).filter((t) => t && !(p.area && t.includes(p.area)) && !branch.test(t));
@@ -347,22 +345,38 @@ async function placeVideos(key: string, country: string, p: ShortPlace) {
   const relevant = (t: string) => cores.some((c) => textKey(t).includes(c));
   const inArea = (t: string) => !!p.area && textKey(t).includes(textKey(p.area));
   const seen = new Set<string>();
-  const hits = [...ig, ...yt].flatMap((r) => {
-    const v = videoOf(r.url);
-    if (!v || seen.has(v.id)) return [];
-    seen.add(v.id);
-    // Tavily 有時只抓到 IG 的登入頁，看不出內容，要等 oEmbed 拿到說明再比對
-    const login = /^instagram$/i.test(r.title.trim()) || /^(log ?in|sign ?up|ログイン|로그인)/i.test(r.content.trim());
-    // YouTube 有些影片在這裡播不了（oEmbed 還是會回成功）
-    if (/content isn.t available|この動画は再生できません/i.test(r.content)) return [];
-    return [{ ...v, text: `${r.title} ${r.content}`, head: r.title, login, score: r.score }];
-  }).filter((h) => h.login || relevant(h.text));
-  const pick = [...hits.filter((h) => h.platform === "Instagram").slice(0, 5), ...hits.filter((h) => h.platform === "YouTube").slice(0, 3)];
-  const checked = await Promise.all(pick.map(async (h) => ({ ...h, ...(await checkVideo(h)) })));
-  // Tavily 的說明常混進別頁的內容：確認存在的只看平台回傳的影片說明；沒辦法確認的只看 Tavily 的標題
-  const own = (h: (typeof checked)[number]) => (h.ok === true ? `${h.title ?? ""} ${h.login ? "" : h.head}` : h.head);
-  const ok = checked.filter((h) => (h.ok === true || (h.ok === null && !h.login)) && relevant(own(h)));
-  ok.sort((a, b) => Number(b.ok === true) - Number(a.ok === true) || Number(inArea(own(b))) - Number(inArea(own(a))) || Number(!!b.vertical) - Number(!!a.vertical) || b.score - a.score);
+  // IG 只限 /reel 路徑才不會混進圖文貼文；YouTube 只限網域（限定 /shorts 反而不準）
+  const collect = async (igQuery: string, ytQuery: string) => {
+    const [ig, yt] = await Promise.all([tavilyVideos(key, igQuery.replace(/\s+/g, " "), ["instagram.com/reel"]), tavilyVideos(key, ytQuery, ["youtube.com"])]);
+    const hits = [...ig, ...yt].flatMap((r) => {
+      const v = videoOf(r.url);
+      if (!v || seen.has(v.id)) return [];
+      seen.add(v.id);
+      // Tavily 有時只抓到 IG 的登入頁，看不出內容，要等 oEmbed 拿到說明再比對
+      const login = /^instagram$/i.test(r.title.trim()) || /^(log ?in|sign ?up|ログイン|로그인)/i.test(r.content.trim());
+      // YouTube 有些影片在這裡播不了（oEmbed 還是會回成功）
+      if (/content isn.t available|この動画は再生できません/i.test(r.content)) return [];
+      return [{ ...v, text: `${r.title} ${r.content}`, head: r.title, login, score: r.score }];
+    }).filter((h) => h.login || relevant(h.text));
+    const pick = [...hits.filter((h) => h.platform === "Instagram").slice(0, 5), ...hits.filter((h) => h.platform === "YouTube").slice(0, 3)];
+    const checked = await Promise.all(pick.map(async (h) => ({ ...h, ...(await checkVideo(h)) })));
+    // Tavily 的說明常混進別頁的內容：確認存在的只看平台回傳的影片說明；沒辦法確認的只看 Tavily 的標題
+    return checked
+      .map((h) => ({ ...h, own: h.ok === true ? `${h.title ?? ""} ${h.login ? "" : h.head}` : h.head }))
+      .filter((h) => (h.ok === true || (h.ok === null && !h.login)) && relevant(h.own));
+  };
+  // 第一次：IG 用當地語言＋地區＋類別，YouTube 用中文＋shorts
+  let ok = await collect(`${withArea(p.name_local)} ${p.category} ${reel}`, `${withArea(p.name_zh || p.name_local)} shorts`);
+  // 找不太到：分店名、類別常讓搜尋跑偏（例如不存在的「池袋東口店」），改用店名本身＋地區再找一次，YouTube 這次不限 Shorts
+  if (ok.length < 2) {
+    const name = p.keywords[0] || tokens[0] || p.name_local;
+    ok = [...ok, ...(await collect(`${withArea(name)} ${reel}`, withArea(name)))];
+  }
+  ok.sort(
+    (a, b) =>
+      Number(b.ok === true) - Number(a.ok === true) || Number(inArea(b.own)) - Number(inArea(a.own)) || Number(b.short) - Number(a.short) ||
+      Number(!!b.vertical) - Number(!!a.vertical) || b.score - a.score,
+  );
   return [...ok.filter((h) => h.platform === "Instagram").slice(0, 3), ...ok.filter((h) => h.platform === "YouTube").slice(0, 2)].slice(0, 4);
 }
 
@@ -1514,7 +1528,7 @@ export const TOOLS: Tool[] = [
     decl: {
       name: "find_short_videos",
       description:
-        "找景點、美食、餐廳的 IG Reels、YouTube Shorts 短片介紹（成員說「有沒有短片」「找影片介紹」「找相關短片」時用）。" +
+        "找地點、店家、美食、景點的 IG Reels、YouTube 短片或介紹影片：成員想看影片或實際畫面時就用，不管怎麼說（「有沒有短片」「有人拍嗎」「想看看長怎樣」「好啊找找看」都算），不要叫成員自己去搜尋。" +
         "會確認影片真的存在、跟地點有關，影片卡片（縮圖、標題、連結）會自動顯示在回答下方；不要自己寫影片網址。一次最多 2 個地點。",
       parameters: {
         type: "object",
