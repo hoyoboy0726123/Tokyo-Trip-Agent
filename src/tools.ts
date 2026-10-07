@@ -335,13 +335,13 @@ async function tavilyVideos(key: string, query: string, domains: string[]) {
 }
 
 /** 中文說明（繁體、簡體都算）：中文常用字比平假名多（日本人寫的說明平假名很多；店名的片假名不算） */
-const zhCaption = (t: string) => (t.match(/[的是我們们這这很超吃喝好推薦荐必在了嗎吗吧呢也都就還还真]/g) ?? []).length > (t.match(/[\u3041-\u309f]/g) ?? []).length;
+export const zhCaption = (t: string) => (t.match(/[的是我們们這这很超吃喝好推薦荐必在了嗎吗吧呢也都就還还真]/g) ?? []).length > (t.match(/[\u3041-\u309f]/g) ?? []).length;
 
 /** 只是料理或類別、不是店名（「池袋串燒」的「串燒」） */
 const GENERIC_FOOD = /^(串燒|串焼き?|焼き?鳥|燒鳥|やきとり|居酒屋|美食|グルメ|拉麵|拉面|ラーメン|燒肉|烤肉|焼肉|壽司|寿司|すし|咖啡|カフェ|甜點|スイーツ|餐廳|レストラン|맛집|小吃|夜景|景點|觀光|購物|逛街|美食街|食べ歩き)$/;
 
-/** 別的國家、地區（中文創作者常拍台灣、香港分店；港幣、.hk 帳號也算） */
-const ELSEWHERE = /全台|台灣|臺灣|台北|臺北|新北|台中|臺中|台南|臺南|高雄|新竹|桃園|香港|澳門|\.hk\b|hk\$|nt\$|紐約|\bnyc?\b|アメリカ|美國|新加坡|馬來西亞|吉隆坡|上海|北京|深圳|廣州|曼谷/i;
+/** 別的國家、地區（中文創作者常拍台灣、香港分店；港幣、台幣「460元」、.hk 帳號也算；日圓寫「円」「日圓」不會中） */
+const ELSEWHERE = /全台|台灣|臺灣|台北|臺北|新北|台中|臺中|台南|臺南|高雄|新竹|桃園|香港|澳門|\.hk\b|hk\$|nt\$|\d+\s*元|紐約|ニューヨーク|\bnyc?\b|アメリカ|美國|新加坡|馬來西亞|吉隆坡|上海|北京|深圳|廣州|曼谷/i;
 /** 同一個國家的其他大城市（連鎖店別的分店） */
 const OTHER_CITIES: [RegExp, RegExp][] = [
   [/日本/, /大阪|梅田|難波|京都|名古屋|福岡|博多|札幌|仙台|神戸|神戶|横浜|橫濱|千葉|柏市|埼玉|大宮|沖縄|沖繩|那覇|広島|廣島|金沢|金澤/],
@@ -387,8 +387,8 @@ async function placeVideos(key: string, country: string, city: string, p: ShortP
     return checked
       .map((h) => ({ ...h, own: h.ok === true ? `${h.title ?? ""} ${h.login ? "" : h.head}` : h.head }))
       .filter((h) => (h.ok === true || (h.ok === null && !h.login)) && relevant(h.own))
-      // 連鎖店別處分店的影片（香港、台灣、其他城市）：沒提到這次的地區或城市就不要
-      .filter((h) => inPlace(h.own) || !elsewhere(`${h.own} ${h.author ?? ""}`));
+      // 連鎖店別處分店的影片（香港、台灣、紐約、其他城市）：提到別處的，要明確提到這次的地區才留（「東京發祥、NY 上陸」只提到城市不算）
+      .filter((h) => !elsewhere(`${h.own} ${h.author ?? ""}`) || inArea(h.own));
   };
   // 影片有提到這次的地區或城市；或講的是別的國家、同國其他城市（連鎖店別的分店）
   const inPlace = (t: string) => inArea(t) || (!!city && textKey(t).includes(textKey(city)));

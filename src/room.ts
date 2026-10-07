@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { decryptText, encryptText, maskKey, safeEqual } from "./auth";
 import { geminiProvider, parseArgs, providerFor, validateGemini, type GeminiGate } from "./providers";
 import { GeminiLimiter, RateLimitedError } from "./ratelimit";
-import { cleanRouteMap, routeMapPrompt, DRAFT_TOOLS, japanAlerts, reverseArea, runTool, SCALE_TEXT, toolLabel, TOOL_DECLS, type AttachedImage, type DraftInput, type ExpenseInput, type RoomApi } from "./tools";
+import { cleanRouteMap, routeMapPrompt, zhCaption, DRAFT_TOOLS, japanAlerts, reverseArea, runTool, SCALE_TEXT, toolLabel, TOOL_DECLS, type AttachedImage, type DraftInput, type ExpenseInput, type RoomApi } from "./tools";
 import { fixMapLinks, type MapFixOptions } from "./maplinks";
 import { renderDiaryPage } from "./diary-page";
 import { looksJapanese, translate, type Lang } from "./translate";
@@ -2229,7 +2229,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 要看「大家自己拍、傳到聊天室的照片」（第一天的照片、我們在某地的合照、某人傳的照片、昨天吃的拉麵）→ find_chat_photos（「第一天」「昨天」換算成日期，內容寫進 keyword），照片會顯示在回答下方，不是網路圖片；沒找到就照實說，不要拿網路圖片代替。
 - 你可以用 find_images 把網路上的圖片直接顯示給成員（照片、捷運／地鐵路線圖、平面圖、菜單…），絕對不要說「無法傳送圖片」。
 - 成員要求看網路上的照片／圖片／路線圖時，一定要用 find_images（店名或景點名稱加地名；好幾個地方就放進 queries 一次查完）；圖片會自動顯示在回答下方。絕對不要自己產生圖片網址或 Google 圖片搜尋連結，並提醒是網路圖片、僅供參考。沒有要求就不要找圖片。
-- 成員想看任何地點、店家、美食、景點的影片或實際畫面時，不管怎麼說（短片、影片、Reels、YouTube、有人拍嗎、想看看長怎樣、好啊找找看…），都用 find_short_videos 去找（places 填當地語言名稱、中文名稱、地區、類別、keywords），影片卡片會自動顯示在回答下方；不要沒查就叫成員自己去 IG 或 YouTube 搜尋，也絕對不要自己寫 IG、YouTube、TikTok 的影片網址；成員沒要看影片就不要主動找（回答下方會有找短片的按鈕）。預設找當地語言的；成員想看中文介紹的（台灣人拍的、聽得懂的），language 填 chinese 再找一次。
+- 成員想看任何地點、店家、美食、景點的影片或實際畫面時，不管怎麼說（短片、影片、Reels、YouTube、有人拍嗎、想看看長怎樣、好啊找找看…），都用 find_short_videos 去找（places 填當地語言名稱、中文名稱、地區、類別、keywords），影片卡片會自動顯示在回答下方；不要沒查就叫成員自己去 IG 或 YouTube 搜尋，也絕對不要自己寫 IG、YouTube、TikTok 的影片網址；成員沒要看影片就不要主動找（回答下方會有找短片的按鈕）；成員說「另外」「其他」「剩下的」，就找還沒找過的地點。預設找當地語言的；成員想看中文介紹的（台灣人拍的、聽得懂的），language 填 chinese 再找一次。
 - 問「我附近有什麼」：直接用 find_nearby，near 留空（系統會自動用發問者的 GPS），回答時列出實際店名、距離、步行分鐘與地圖連結，不要只給「附近有很多」這種泛泛建議；需要評價再用 web_search 補充。問「某個地方附近有什麼」（例如龜有公園附近），也要用 find_nearby，near 填日文地名（亀有公園）。問「我在哪」用 get_member_locations，說出區域與最近的車站。
 - 迪士尼當天問排隊，用 disney_wait_times。
 - 問電車有沒有延誤、停駛 → train_status；問計程車多少錢、要多久 → taxi_fare；問地震、颱風、天氣會不會影響行程 → japan_alerts。
@@ -2444,7 +2444,9 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
             ? routeCheckButton(trigger.text)
             : !toolsUsed.includes("find_short_videos") && !trigger.photo_id && finalText.length > 80 && (PLACE_ASK.test(trigger.text) || (finalText.match(PLACE_LINK) ?? []).length >= 2)
               ? videoButton(trigger.text)
-              : toolsUsed.includes("find_short_videos") && !CHINESE_ASK.test(trigger.text)
+              : toolsUsed.includes("find_short_videos") && !CHINESE_ASK.test(trigger.text) &&
+                  // 找到的影片已經全是中文就不用再找；一支都沒找到時照樣可以改找中文
+                  (!images.some((im) => im.video) || images.some((im) => im.video && !zhCaption(im.caption)))
                 ? chineseButton(videoPlaces)
                 : null;
         finalText = dropFakeVideoLinks(finalText, toolJson + images.map((im) => im.page ?? "").join(" "));
