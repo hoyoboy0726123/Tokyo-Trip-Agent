@@ -6,6 +6,7 @@
  *    確定正確的短網址（例如房東給的住宿地圖）用 keep 保留
  * 4. 查詢字裡有座標（找附近的結果）→ 直接用座標，位置最準
  * 5. 提到住宿 → 一律換成正確的住宿位置與導航目的地（home）
+ * 6. 導航連結文字寫了「從 A 到 B」→ 起訖點以文字為準（網址常把站名編碼錯）
  * 找不到可靠的地點名稱又是亂碼的連結就拿掉，只留文字，不給會帶錯路的連結。
  */
 
@@ -127,6 +128,12 @@ function fixDirection(url: string, label: string, before: string, home?: MapFixO
     const name = nearestPlace(before, true);
     return name ? `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(name)}` : null;
   }
+  // 連結文字寫了「從 A 到 B」：模型自己編碼網址常打錯字（「六本本駅」「澤交駅」），以連結文字為準
+  const pair = routeLabel(label);
+  if (pair) {
+    if (!sameName(pair[0], u.searchParams.get("origin") ?? "")) u.searchParams.set("origin", pair[0]);
+    if (!sameName(pair[1], u.searchParams.get("destination") ?? "")) u.searchParams.set("destination", pair[1]);
+  }
   const origin = u.searchParams.get("origin");
   const fromHome = !!home && !!origin && isHome(home, "", origin);
   if (fromHome) u.searchParams.set("origin", home!.dest);
@@ -146,6 +153,22 @@ function fixDirection(url: string, label: string, before: string, home?: MapFixO
     else if (looksBroken(dest)) return null;
   }
   return u.toString();
+}
+
+/** 連結文字裡的「從 A 到 B」「A → B」 */
+function routeLabel(label: string): [string, string] | null {
+  const t = label.replace(EMOJI, "");
+  const m = t.match(/從\s*(.{2,20}?)\s*(?:到|前往|去)\s*(.{2,20}?)\s*(?:的|$|\s|（|\()/) ?? t.match(/([^\s→>]{2,20})\s*(?:→|->|➡)\s*([^\s的（(]{2,20})/);
+  if (!m) return null;
+  const a = m[1].trim(), b = m[2].trim();
+  return !GENERIC.test(a) && !GENERIC.test(b) && !/google|地圖|導航|路線/i.test(a + b) ? [a, b] : null;
+}
+
+/** 站名比對：繁體／日文漢字、「站」「駅」「station」都算一樣 */
+const VARIANT: Record<string, string> = { 樂: "楽", 淺: "浅", 澀: "渋", 藏: "蔵", 驛: "駅", 國: "国", 廣: "広", 濱: "浜", 澤: "沢", 邊: "辺", 惠: "恵", 兩: "両", 區: "区", 黑: "黒", 龜: "亀", 豐: "豊", 臺: "台", 鐵: "鉄", 櫻: "桜", 學: "学", 會: "会" };
+function sameName(a: string, b: string): boolean {
+  const k = (s: string) => [...s.normalize("NFKC")].map((c) => VARIANT[c] ?? c).join("").replace(/\s|站|駅|역|station/gi, "").toLowerCase();
+  return k(a) === k(b);
 }
 
 function linkTarget(url: string): string {
