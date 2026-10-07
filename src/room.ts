@@ -242,6 +242,10 @@ const ROUTE_WORD = "(路線|線|站|搭|坐|轉乘|換車|地鐵|電車|捷運|�
 const CHECK_WORD = "(查證|確認|核對|確定|對不對|對嗎|正確嗎|沒錯嗎|官方|路線圖)";
 const ROUTE_VERIFY = new RegExp(`幾站|站數|${CHECK_WORD}.{0,20}${ROUTE_WORD}|${ROUTE_WORD}.{0,20}${CHECK_WORD}`);
 
+/** 問交通路線：備援模型（Gemma）記的路線比較不準，回答要加註 */
+const ROUTE_ASK = /(怎麼|如何).{0,8}(去|到|搭|坐|走)|交通|路線|轉乘|換車|幾站|(搭|坐).{0,6}(線|車)|地鐵|捷運|電車|JR|新幹線|巴士|公車/;
+const BACKUP_ROUTE_NOTE = "⚠️ 這次由備援模型回答，路線的方向和轉乘可能不準，出發前請以 Google 地圖為準。";
+
 /** 沒附任何圖時，拿掉「依據…路線圖」「已附在下方」這類說法（模型會學前面查證過的回答） */
 const MAP_CLAIM = /路線圖.{0,20}(已附|附在下方|附圖)|依據[:：]?.{0,20}路線圖/;
 function dropMapClaims(text: string): string {
@@ -2291,6 +2295,8 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
             onDelta: (delta) => this.broadcast({ type: "ai_delta", id, delta }),
             // 好幾張照片（菜單好幾頁）回答會很長，45 秒不夠
             ...(photoParts.length > 1 ? { timeoutMs: 120_000 } : {}),
+            // Gemini 塞車時不要乾等：後面還有備援就只等它開始回應 15 秒（附照片 30 秒）
+            ...(pid !== order[order.length - 1] ? { firstChunkMs: photoParts.length ? 30_000 : 15_000 } : {}),
           });
           if (!res.calls.length) {
             // 模型偶爾偷懶：嘴上說「已加入清單」「圖片在下方」卻沒呼叫工具。提醒一次，重新回答
@@ -2366,6 +2372,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
           if (step === MAX_STEPS - 1) finalText = res.text || "（查了很多資料，但還沒整理完，請再問一次更具體的問題 🙏）";
         }
         if (!images.length) finalText = dropMapClaims(finalText);
+        if (provider.id === "workers-ai" && ROUTE_ASK.test(trigger.text) && /線|轉乘|方向|站/.test(finalText)) finalText = `${finalText.trim()}\n\n${BACKUP_ROUTE_NOTE}`;
         if (!finalText.trim()) finalText = images.length ? "幫你找到這些圖片 👇（網路圖片，僅供參考）" : "嗯…我沒有想到好的回答，可以換個方式問我嗎？";
         const row = this.insertMessage({
           id, author: AI_NAME, role: "assistant", text: fixMapLinks(stripSpeakerTag(finalText), this.mapFix()), photo_id: null, lat: null, lon: null,

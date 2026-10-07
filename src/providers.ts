@@ -27,7 +27,7 @@ export function geminiProvider(env: Env, model?: string, gate?: GeminiGate): Pro
   return {
     id: "gemini",
     model: m,
-    async generate({ system, turns, tools, onDelta, json, timeoutMs }) {
+    async generate({ system, turns, tools, onDelta, json, timeoutMs, firstChunkMs }) {
       if (!env.GEMINI_API_KEY) throw new Error("尚未設定 GEMINI_API_KEY");
       const body: Record<string, unknown> = {
         systemInstruction: { parts: [{ text: system }] },
@@ -51,14 +51,25 @@ export function geminiProvider(env: Env, model?: string, gate?: GeminiGate): Pro
       // 不自動重試：重試只會更快把 RPM/TPM 用光。失敗就冷卻，由上層改用備援模型
       const report = gate ? await gate.acquire(estimateTokens(system, turns, tools)) : undefined;
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:streamGenerateContent?alt=sse`;
+      // 塞車時 Gemini 常常很久才開始回（平常 1–3 秒）：firstChunkMs 內沒開始回就放棄、冷卻一分鐘，改用備援
+      const slow = new AbortController();
+      const slowTimer = firstChunkMs ? setTimeout(() => slow.abort(), firstChunkMs) : null;
+      const slowError = (e: unknown) => {
+        if (!slow.signal.aborted) return e;
+        gate?.failed(503, "slow first chunk");
+        return new Error(`Gemini ${(firstChunkMs ?? 0) / 1000} 秒沒有開始回應（塞車）`);
+      };
       const res = await fetch(url, {
         method: "POST",
         // 串流卡住時整段放棄，改用備援模型，避免聊天室一直顯示「思考中」
-        signal: AbortSignal.timeout(timeoutMs ?? 45_000),
+        signal: AbortSignal.any([AbortSignal.timeout(timeoutMs ?? 45_000), slow.signal]),
         headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY.trim() },
         body: JSON.stringify(body),
+      }).catch((e) => {
+        throw slowError(e);
       });
       if (!res.ok || !res.body) {
+        clearTimeout(slowTimer);
         const errText = await res.text();
         gate?.failed(res.status, errText);
         throw new Error(`Gemini ${res.status}: ${errText.slice(0, 300)}`);
@@ -69,7 +80,10 @@ export function geminiProvider(env: Env, model?: string, gate?: GeminiGate): Pro
       const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
       let buffer = "";
       for (;;) {
-        const { value, done } = await reader.read();
+        const { value, done } = await reader.read().catch((e) => {
+          throw slowError(e);
+        });
+        clearTimeout(slowTimer);
         if (done) break;
         buffer += value;
         let idx: number;

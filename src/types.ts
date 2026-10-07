@@ -62,5 +62,7 @@ export interface Provider {
     maxTokens?: number;
     /** Gemini 整段回應的時限（預設 45 秒；寫長文的模型要久一點） */
     timeoutMs?: number;
+    /** Gemini 多久沒開始回應就放棄、改用備援（塞車時常常一直不回；只用在聊天，後面還有備援模型時才設） */
+    firstChunkMs?: number;
   }): Promise<GenerateResult>;
 }
