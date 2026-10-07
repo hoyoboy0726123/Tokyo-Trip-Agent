@@ -333,7 +333,7 @@ function messageNode(msg) {
   const pinned = S.pinned?.has(msg.id);
   if (pinned) node.classList.add("pinned");
   const actions = `<div class="msg-actions"><button type="button" data-act="reply">${svg("reply")}<span>回覆</span></button><button type="button" data-act="copy">${svg("copy")}<span>複製</span></button><button type="button" data-act="pin">${svg("pushpin")}<span>${pinned ? "取消置頂" : "置頂"}</span></button></div>`;
-  const images = (msg.meta?.images ?? []).filter((im) => typeof im.src === "string" && (im.src.startsWith("/api/img?") || im.src.startsWith("/api/photo/")));
+  const images = (msg.meta?.images ?? []).filter((im) => !im.video && typeof im.src === "string" && (im.src.startsWith("/api/img?") || im.src.startsWith("/api/photo/")));
   const webImages = images.some((im) => im.src.startsWith("/api/img?"));
   if (images.length) {
     body += `<div class="gallery">${images
@@ -345,6 +345,16 @@ function messageNode(msg) {
         </figure>`;
       })
       .join("")}</div>${webImages ? `<div class="small muted">🖼 網路圖片，僅供參考</div>` : ""}`;
+  }
+  // 短片卡片：縮圖＋標題，點了開 IG／YouTube（只收工具找到的影片網址）
+  const vids = (msg.meta?.images ?? []).filter((im) => im.video && /^https:\/\/www\.(instagram|youtube)\.com\//.test(im.page ?? ""));
+  if (vids.length) {
+    body += `<div class="vids">${vids
+      .map((v) => `<a class="vid" href="${escapeHtml(v.page)}" target="_blank" rel="noopener">
+        <span class="vid-thumb">${typeof v.src === "string" && v.src.startsWith("/api/img?") ? `<img src="${escapeHtml(v.src)}" loading="lazy" alt="" onerror="this.remove()" />` : ""}<span class="vid-play">▶</span><span class="vid-plat">${v.video.platform === "YouTube" ? "YouTube" : "IG"}</span></span>
+        <span class="vid-text"><b>${escapeHtml(v.caption || "短片")}</b><small>${escapeHtml([v.video.author ? "@" + v.video.author : "", v.label ?? ""].filter(Boolean).join("・"))}${v.video.verified ? "" : "・未確認"}</small></span>
+      </a>`)
+      .join("")}</div><div class="small muted">🎬 網路短片，IG 沒登入可能只能看幾支</div>`;
   }
   if (isAI) {
     const provider = msg.meta?.provider ? (msg.meta.provider === "workers-ai" ? "Workers AI" : "Gemini") : "";

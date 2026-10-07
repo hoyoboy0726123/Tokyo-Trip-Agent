@@ -101,6 +101,8 @@ const INTENTS: { tool: string; test: (text: string, hasPhoto: boolean) => boolea
   { tool: "find_documents", test: (t) => /(給我看|找出|叫出|拿出).{0,12}(票|門票|票券|訂位|確認信|QR|登機證)/.test(t) },
   // 問幾站、要查證確認路線：找路線圖（官方優先）照圖回答
   { tool: "check_route_map", test: (t, p) => !p && ROUTE_VERIFY.test(t) && !/延誤|停駛|誤點|運行|計程車|taxi|uber|走路|步行/i.test(t) },
+  // 要看 IG／YouTube 短片介紹
+  { tool: "find_short_videos", test: (t, p) => !p && /短片|短影音|reels?\b|shorts|(找|看|有沒有|推薦).{0,8}(影片|視頻)|youtube|\big\b.{0,6}(影片|介紹|推薦)/i.test(t) },
   // 「路線圖」「傳圖給我」也算要看圖；自己附了照片時是要 AI 看那張照片，不是上網找圖
   { tool: "find_chat_photos", test: (t, p) => !p && OWN_PHOTO.test(t) && !/長什麼樣|網路|網上|存成|票券/.test(t), alt: ["find_images", "find_documents"] },
   { tool: "find_images", test: (t, p) => !p && /照片|圖片|相片|看圖|附圖|長什麼樣|路線圖|地鐵圖|捷運圖|平面圖|示意圖|菜單圖|(傳|給|找|看).{0,6}圖(?!書)|photo|picture|image/i.test(t) && !/存|票券|地圖/.test(t) && !OWN_PHOTO.test(t), alt: ["find_chat_photos", "check_route_map"] },
@@ -250,6 +252,23 @@ const BACKUP_ROUTE_NOTE = "⚠️ 這次由備援模型回答，路線的方向�
 function routeCheckButton(question: string) {
   const q = question.replace(/@(ai|AI|旅伴|助理|小幫手)\s*/g, "").replace(/\s+/g, " ").trim().slice(0, 60);
   return { hint: "路線是 AI 憑記憶回答的，可能有錯", buttons: [{ label: "🗺️ 上網找路線圖查證", text: `幫我上網找官方地鐵路線圖，查證「${q}」的路線對不對` }] };
+}
+
+/** 問景點、美食、餐廳：回答下方放「找相關短片」按鈕 */
+const PLACE_ASK = /好吃|美食|餐廳|吃什麼|吃哪|拉麵|燒肉|壽司|咖啡|甜點|小吃|景點|好玩|推薦|必去|必吃|必逛|逛街|夜市|市場|商圈|神社|寺|公園|博物館|美術館|樂園|展望台|晴空塔|迪士尼|值得去/;
+function videoButton(question: string) {
+  const q = question.replace(/@(ai|AI|旅伴|助理|小幫手)\s*/g, "").replace(/\s+/g, " ").trim().slice(0, 60);
+  return { buttons: [{ label: "🎬 找相關短片", text: `幫我找剛才介紹的地點的 IG、YouTube 短片（原本的問題：「${q}」）` }] };
+}
+
+/** 模型自己寫的 IG／YouTube／TikTok 網址常是編的：不是工具找到的就拿掉（連結文字留著） */
+const SOCIAL_HOST = /^https?:\/\/(?:[\w-]+\.)?(?:instagram\.com|youtube\.com|youtu\.be|tiktok\.com)\//i;
+function dropFakeVideoLinks(text: string, known: string): string {
+  return text
+    .replace(/\[([^\]\n]*)\]\((https?:\/\/[^)\s]+)\)/g, (all, label: string, url: string) => (SOCIAL_HOST.test(url) && !known.includes(url) ? label : all))
+    .replace(/https?:\/\/(?:[\w-]+\.)?(?:instagram\.com|youtube\.com|youtu\.be|tiktok\.com)\/[^\s)）\]]+/gi, (url, offset: number, all: string) =>
+      all[offset - 1] === "(" || known.includes(url) ? url : "",
+    );
 }
 
 /** 沒附任何圖時，拿掉「依據…路線圖」「已附在下方」這類說法（模型會學前面查證過的回答） */
@@ -2187,6 +2206,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 要看「大家自己拍、傳到聊天室的照片」（第一天的照片、我們在某地的合照、某人傳的照片、昨天吃的拉麵）→ find_chat_photos（「第一天」「昨天」換算成日期，內容寫進 keyword），照片會顯示在回答下方，不是網路圖片；沒找到就照實說，不要拿網路圖片代替。
 - 你可以用 find_images 把網路上的圖片直接顯示給成員（照片、捷運／地鐵路線圖、平面圖、菜單…），絕對不要說「無法傳送圖片」。
 - 成員要求看網路上的照片／圖片／路線圖時，一定要用 find_images（店名或景點名稱加地名；好幾個地方就放進 queries 一次查完）；圖片會自動顯示在回答下方。絕對不要自己產生圖片網址或 Google 圖片搜尋連結，並提醒是網路圖片、僅供參考。沒有要求就不要找圖片。
+- 成員想看景點、美食、餐廳的短片介紹（IG Reels、YouTube Shorts）時用 find_short_videos（places 填當地語言名稱、中文名稱、地區、類別），影片卡片會自動顯示在回答下方；絕對不要自己寫 IG、YouTube、TikTok 的影片網址。
 - 問「我附近有什麼」：直接用 find_nearby，near 留空（系統會自動用發問者的 GPS），回答時列出實際店名、距離、步行分鐘與地圖連結，不要只給「附近有很多」這種泛泛建議；需要評價再用 web_search 補充。問「某個地方附近有什麼」（例如龜有公園附近），也要用 find_nearby，near 填日文地名（亀有公園）。問「我在哪」用 get_member_locations，說出區域與最近的車站。
 - 迪士尼當天問排隊，用 disney_wait_times。
 - 問電車有沒有延誤、停駛 → train_status；問計程車多少錢、要多久 → taxi_fare；問地震、颱風、天氣會不會影響行程 → japan_alerts。
@@ -2270,6 +2290,8 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
     await this.prepareMemoryQuery(memoryText(trigger));
     const system = this.systemPrompt(trigger, history[0]?.ts ?? trigger.ts);
     const images: AttachedImage[] = [];
+    // 這次工具回傳的內容：檢查回答裡的影片網址是不是工具找到的
+    let toolJson = "";
     const toolsUsed: string[] = [];
     const drafts: number[] = [];
     const propose = (d: DraftInput) => this.propose(d, user.name, id, drafts);
@@ -2372,6 +2394,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
               attachImage: (img) => images.length < 8 && images.push(img),
               propose,
             });
+            toolJson += JSON.stringify(result ?? "");
             resultParts.push({ result: { id: c.id, name: c.name, response: result } });
           }
           turns = [...turns, { role: "model", parts: modelParts }, { role: "user", parts: resultParts }];
@@ -2383,7 +2406,10 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
         const quick =
           !toolsUsed.includes("check_route_map") && !trigger.photo_id && ROUTE_ASK.test(trigger.text) && !/延誤|停駛|誤點|運行/.test(trigger.text) && /線|轉乘|方向|站/.test(finalText)
             ? routeCheckButton(trigger.text)
-            : null;
+            : !toolsUsed.includes("find_short_videos") && !trigger.photo_id && PLACE_ASK.test(trigger.text) && finalText.length > 80
+              ? videoButton(trigger.text)
+              : null;
+        finalText = dropFakeVideoLinks(finalText, toolJson + images.map((im) => im.page ?? "").join(" "));
         if (!finalText.trim()) finalText = images.length ? "幫你找到這些圖片 👇（網路圖片，僅供參考）" : "嗯…我沒有想到好的回答，可以換個方式問我嗎？";
         const row = this.insertMessage({
           id, author: AI_NAME, role: "assistant", text: fixMapLinks(stripSpeakerTag(finalText), this.mapFix()), photo_id: null, lat: null, lon: null,
@@ -2463,7 +2489,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       const now = jstNow();
       try {
         const parts: Part[] = [{
-          text: `成員（${user.name}）說：「${trigger.text}」
+          text: `成員（${user.name}）說：「${trigger.text}」${need === "find_short_videos" ? `\n上一則 AI 回答：\n${([...history].reverse().find((m) => m.role === "assistant" && m.id !== id)?.text ?? "").slice(0, 1500)}` : ""}
 現在是東京時間 ${now.date}（${now.weekday}）${now.time}。旅程 ${TRIP.startDate} 到 ${TRIP.endDate}（第一天＝${TRIP.startDate}）。旅伴名單：${this.members().join("、") || user.name}。
 請產生呼叫工具「${need}」要用的參數。
 工具說明：${decl.description}
