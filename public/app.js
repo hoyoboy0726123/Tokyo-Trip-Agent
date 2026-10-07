@@ -315,6 +315,9 @@ function messageNode(msg) {
   node.className = `msg ${isAI ? "ai" : isMe ? "me" : "other"}`;
   node.dataset.id = msg.id;
   node.dataset.ts = msg.ts;
+  node.dataset.author = msg.author;
+  if (isAI && msg.meta?.for?.author) node.dataset.for = msg.meta.for.author;
+  if (isAI && msg.meta?.kind) node.dataset.sys = "1";
   let body = "";
   // 這則是在回覆別的訊息：上面顯示引用，點一下跳回原訊息
   if (!isAI && msg.meta?.reply) body += `<button type="button" class="quote" data-quote="${escapeHtml(msg.meta.reply.id)}"><b>${escapeHtml(msg.meta.reply.author)}</b><span>${escapeHtml(plainExcerpt({ text: msg.meta.reply.text }))}</span></button>`;
@@ -872,6 +875,7 @@ function receiptFlow() {
 function renderChips() {
   const chips = [
     ["sun", "今天", () => ask("今天的行程和天氣？")],
+    ["users", els.messages.classList.contains("only-mine") ? "顯示全部對話" : "只看我和 AI", () => toggleMine()],
     ["utensils", "附近美食", () => ask("我附近有什麼好吃的？", true)],
     ["receipt", "收據記帳", receiptFlow],
     ["train", "電車狀況", () => ask("有樂町線、山手線現在有延誤嗎？")],
@@ -2461,3 +2465,45 @@ function toggleMic() {
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 
 checkSession();
+
+// ---------- 只看我和 AI 的對話：只顯示自己的訊息和 AI 回自己的訊息 ----------
+
+const mineBar = Object.assign(document.createElement("div"), { className: "mine-bar", hidden: true });
+mineBar.innerHTML = `<span>👤 只顯示你和 AI 的對話</span><button type="button" class="btn small">顯示全部</button>`;
+els.messages.before(mineBar);
+mineBar.querySelector("button").addEventListener("click", () => toggleMine(false));
+
+/** 標出每則訊息算不算「我的」：AI 的回答有記回誰就照記的，舊訊息看前面最近的那則是誰問的 */
+function markMine() {
+  if (!els.messages.classList.contains("only-mine")) return;
+  const me = S.me?.name;
+  let asker = null;
+  for (const n of els.messages.querySelectorAll(".msg")) {
+    if (n.classList.contains("ai")) n.dataset.mine = !n.dataset.sys && (n.dataset.for || asker) === me ? "1" : "0";
+    else {
+      asker = n.dataset.author;
+      n.dataset.mine = asker === me ? "1" : "0";
+    }
+  }
+  // 整天都沒有自己的對話，那天的日期分隔線也藏起來
+  for (const sep of els.messages.querySelectorAll(".day-sep")) {
+    let n = sep.nextElementSibling, any = false;
+    while (n && !n.classList.contains("day-sep")) {
+      if (n.dataset.mine === "1") any = true;
+      n = n.nextElementSibling;
+    }
+    sep.dataset.empty = any ? "0" : "1";
+  }
+}
+
+function toggleMine(on = !els.messages.classList.contains("only-mine")) {
+  els.messages.classList.toggle("only-mine", on);
+  mineBar.hidden = !on;
+  if (on) {
+    markMine();
+    els.messages.scrollTop = els.messages.scrollHeight;
+  }
+  renderChips();
+}
+
+new MutationObserver(() => els.messages.classList.contains("only-mine") && requestAnimationFrame(markMine)).observe(els.messages, { childList: true });
