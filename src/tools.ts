@@ -339,10 +339,10 @@ export const zhCaption = (t: string) => (t.match(/[的是我們们這这很超�
 const GENERIC_FOOD = /^(串燒|串焼き?|焼き?鳥|燒鳥|やきとり|居酒屋|美食|グルメ|拉麵|拉面|ラーメン|燒肉|烤肉|焼肉|壽司|寿司|すし|咖啡|カフェ|甜點|スイーツ|餐廳|レストラン|맛집|小吃|夜景|景點|觀光|購物|逛街|美食街|食べ歩き)$/;
 
 /** 別的國家、地區（中文創作者常拍台灣、香港分店；港幣、台幣「460元」、.hk 帳號也算；日圓寫「円」「日圓」不會中） */
-const ELSEWHERE = /全台|台灣|臺灣|台北|臺北|新北|台中|臺中|台南|臺南|高雄|新竹|桃園|香港|澳門|\.hk\b|hk\$|nt\$|\d+\s*元|紐約|ニューヨーク|\bnyc?\b|アメリカ|美國|新加坡|馬來西亞|吉隆坡|上海|北京|深圳|廣州|曼谷/i;
-/** 同一個國家的其他大城市（連鎖店別的分店） */
+const ELSEWHERE = /全台|台灣|臺灣|台北|臺北|新北|台中|臺中|台南|臺南|高雄|新竹|桃園|香港|澳門|\.hk\b|hk\$|nt\$|\d+\s*元|紐約|ニューヨーク|\bnyc?\b|アメリカ(?!ン)|美國(?!海濱)|新加坡|馬來西亞|吉隆坡|上海|北京|深圳|廣州|曼谷/i;
+/** 同一個國家的其他大城市（連鎖店別的分店）；千葉不算：迪士尼、成田機場都在千葉，東京行程常去 */
 const OTHER_CITIES: [RegExp, RegExp][] = [
-  [/日本/, /大阪|梅田|難波|京都|名古屋|福岡|博多|札幌|仙台|神戸|神戶|横浜|橫濱|千葉|柏市|埼玉|大宮|沖縄|沖繩|那覇|広島|廣島|金沢|金澤/],
+  [/日本/, /大阪|梅田|難波|京都|名古屋|福岡|博多|札幌|仙台|神戸|神戶|横浜|橫濱|柏市|埼玉|大宮|沖縄|沖繩|那覇|広島|廣島|金沢|金澤/],
   [/韓/, /釜山|부산|대구|大邱|濟州|済州|제주|인천|仁川|광주|光州/],
 ];
 
@@ -356,7 +356,8 @@ async function placeVideos(key: string, country: string, city: string, p: ShortP
   // 店名或景點名本身要出現在影片說明裡：用 AI 給的 keywords；沒有就從名稱去掉地區和分店（「池袋店」「駅前店」）
   const branch = /(店|駅|站|역|점|口|前)$/;
   const tokens = [p.name_local, p.name_zh].flatMap((n) => n.split(/[\s　]+/)).filter((t) => t && !(p.area && t.includes(p.area)) && !branch.test(t));
-  const names = (p.keywords.length ? p.keywords : tokens).map((k) => (p.area ? k.split(p.area).join("").trim() : k) || k);
+  // 比對名稱：AI 給的 keywords 加上店名本身（keywords 常常只有英文、中文，日本人的說明寫的是日文店名）
+  const names = [...new Set([...p.keywords, ...tokens])].map((k) => (p.area ? k.split(p.area).join("").trim() : k) || k);
   const cores = names.map(textKey).filter((n) => n.length >= 2);
   const inArea = (t: string) => !!p.area && textKey(t).includes(textKey(p.area));
   // 「池袋串燒」這種泛稱（只有料理或類別、沒有店名）：影片也要提到地區，不然會找到別的城市，甚至「金曲串燒」這種歌
@@ -1606,7 +1607,7 @@ export const TOOLS: Tool[] = [
                 category: { type: "string", description: "類別，用當地語言（例如 ラーメン、寺、맛집）" },
                 keywords: {
                   type: "array", items: { type: "string" },
-                  description: "相關影片的說明裡一定會出現的名稱：店名或景點名本身的各種寫法，含台灣人常用的中文俗稱，不含地區和分店（例如 [\"一蘭\",\"Ichiran\"]、[\"仲見世\"]、[\"명동교자\",\"明洞餃子\"]、[\"Cape Cod Cook-Off\",\"鱈魚岬\",\"達菲餐廳\"]）",
+                  description: "相關影片的說明裡一定會出現的名稱：店名或景點名本身的各種寫法，一定要有當地語言（日文、韓文）的寫法，也加台灣人常用的中文俗稱，不含地區和分店（例如 [\"一蘭\",\"Ichiran\"]、[\"仲見世\"]、[\"명동교자\",\"明洞餃子\"]、[\"Cape Cod Cook-Off\",\"鱈魚岬\",\"達菲餐廳\"]）",
                 },
               },
               required: ["name_local", "keywords"],
