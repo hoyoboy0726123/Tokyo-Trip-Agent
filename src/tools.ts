@@ -269,21 +269,19 @@ async function imageUsable(url: string): Promise<boolean> {
 
 /** /api/img 轉送的上限：超過就顯示不出來 */
 const ROUTE_MAP_MAX = 5_000_000;
-/** 短片網址整理成固定格式（IG Reels、YouTube Shorts）；個人頁、標籤頁這類不是單支影片的回 null */
-function videoOf(u: string): { platform: "Instagram" | "YouTube"; url: string; id: string; short: boolean } | null {
+/** 短片網址整理成固定格式（IG Reels、YouTube Shorts）；圖文貼文、一般影片、個人頁、標籤頁都回 null */
+function videoOf(u: string): { platform: "Instagram" | "YouTube"; url: string; id: string } | null {
   try {
     const x = new URL(u);
     const host = x.hostname.replace(/^(www|m)\./, "");
+    // 只收短片：IG Reels、YouTube Shorts（圖文貼文、一般長度的影片都不收）
     if (host === "instagram.com") {
-      const m = x.pathname.match(/^\/(?:[\w.]+\/)?(reels?|p)\/([\w-]{5,})/);
-      return m ? { platform: "Instagram", url: `https://www.instagram.com/${m[1] === "p" ? "p" : "reel"}/${m[2]}/`, id: m[2], short: m[1] !== "p" } : null;
+      const m = x.pathname.match(/^\/(?:[\w.]+\/)?reels?\/([\w-]{5,})/);
+      return m ? { platform: "Instagram", url: `https://www.instagram.com/reel/${m[1]}/`, id: m[1] } : null;
     }
-    if (host === "youtube.com" || host === "youtu.be") {
+    if (host === "youtube.com") {
       const m = x.pathname.match(/\/shorts\/([\w-]{11})/) ?? x.pathname.match(/\/source\/([\w-]{11})\/shorts/);
-      if (m) return { platform: "YouTube", url: `https://www.youtube.com/shorts/${m[1]}`, id: m[1], short: true };
-      // 一般影片也收（Shorts 排前面）：介紹店家的常是一般長度的影片
-      const id = host === "youtu.be" ? x.pathname.slice(1, 12) : x.pathname === "/watch" ? (x.searchParams.get("v") ?? "") : "";
-      return /^[\w-]{11}$/.test(id) ? { platform: "YouTube", url: `https://www.youtube.com/watch?v=${id}`, id, short: false } : null;
+      return m ? { platform: "YouTube", url: `https://www.youtube.com/shorts/${m[1]}`, id: m[1] } : null;
     }
   } catch {}
   return null;
@@ -396,24 +394,24 @@ async function placeVideos(key: string, country: string, city: string, p: ShortP
   const others = OTHER_CITIES.find(([c]) => c.test(country))?.[1];
   const elsewhere = (t: string) => (ELSEWHERE.test(t) && !ELSEWHERE.test(here)) || (!!others && others.test(t) && !others.test(here));
   // 第一次：當地人拍的用當地語言＋地區＋類別找 IG、中文＋shorts 找 YouTube；
-  // 中文影片用中文名＋國家名找（加國家名才不會找到台灣分店），YouTube 不限 Shorts（中文創作者常拍一般長度的 vlog）
+  // 中文影片用中文名＋國家名找（加國家名才不會找到台灣分店）
   const zhName = withArea(p.name_zh || p.name_local);
   let ok = zh
-    ? await collect(`${zhName} ${country}`, `${zhName} ${country}`)
+    ? await collect(`${zhName} ${country}`, `${zhName} ${country} shorts`)
     : await collect(`${withArea(p.name_local)} ${p.category} ${reel}`, `${withArea(p.name_zh || p.name_local)} shorts`);
-  // 找不太到：分店名、類別常讓搜尋跑偏（例如不存在的「池袋東口店」），改用店名本身＋地區再找一次，YouTube 這次不限 Shorts
+  // 找不太到：分店名、類別常讓搜尋跑偏（例如不存在的「池袋東口店」），改用店名本身＋地區再找一次
   if (ok.length < 2 || (zh && ok.filter((h) => zhCaption(h.own)).length < 2)) {
     // 中文再找一次：優先用跟 name_zh 不同的中文俗稱（官方譯名「鱈魚岬烹飪坊」幾乎沒人用，台灣人叫「達菲餐廳」）
     const isZhName = (k: string) => /[\u4e00-\u9fff]/.test(k) && !/[\u3040-\u30ff\uac00-\ud7af]/.test(k);
     const name =
       (zh && (p.keywords.find((k) => isZhName(k) && !p.name_zh.includes(k)) || p.keywords.find(isZhName))) || p.keywords[0] || tokens[0] || p.name_local;
-    ok = [...ok, ...(await (zh ? collect(`${withArea(name)} ${country}`, `${withArea(name)} ${country} vlog`) : collect(`${withArea(name)} ${reel}`, withArea(name))))];
+    ok = [...ok, ...(await (zh ? collect(`${withArea(name)} ${country}`, `${withArea(name)} ${country} shorts`) : collect(`${withArea(name)} ${reel}`, `${withArea(name)} shorts`)))];
   }
   ok.sort(
     (a, b) =>
       (zh ? Number(zhCaption(b.own)) - Number(zhCaption(a.own)) : 0) ||
       Number(b.ok === true) - Number(a.ok === true) || Number(inArea(b.own)) - Number(inArea(a.own)) || Number(inPlace(b.own)) - Number(inPlace(a.own)) ||
-      Number(b.short) - Number(a.short) || Number(!!b.vertical) - Number(!!a.vertical) || b.score - a.score,
+      Number(!!b.vertical) - Number(!!a.vertical) || b.score - a.score,
   );
   // 要中文的：只留中文說明的；一支都沒有就是沒有，不拿其他語言的充數（先挑中文，不然沒提到地名的中文影片會被下一步刷掉）
   if (zh) ok = ok.filter((h) => zhCaption(h.own));
@@ -1591,7 +1589,7 @@ export const TOOLS: Tool[] = [
     decl: {
       name: "find_short_videos",
       description:
-        "找地點、店家、美食、景點的 IG Reels、YouTube 短片或介紹影片：成員想看影片或實際畫面時就用，不管怎麼說（「有沒有短片」「有人拍嗎」「想看看長怎樣」「好啊找找看」都算），不要叫成員自己去搜尋。" +
+        "找地點、店家、美食、景點的短片（只有 IG Reels、YouTube Shorts）：成員想看影片或實際畫面時就用，不管怎麼說（「有沒有短片」「有人拍嗎」「想看看長怎樣」「好啊找找看」都算），不要叫成員自己去搜尋。" +
         "會確認影片真的存在、跟地點有關，影片卡片（縮圖、標題、連結）會自動顯示在回答下方；不要自己寫影片網址。一次最多 2 個地點。",
       parameters: {
         type: "object",
