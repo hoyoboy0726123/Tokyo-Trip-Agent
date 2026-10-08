@@ -2437,6 +2437,11 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
           if (step === MAX_STEPS - 1) finalText = res.text || "（查了很多資料，但還沒整理完，請再問一次更具體的問題 🙏）";
         }
         if (!images.length) finalText = dropMapClaims(finalText);
+        // 說找到影片，卻一張影片卡片都沒有（模型沒照工具結果講）：改成照實說沒有
+        if (toolsUsed.includes("find_short_videos") && !images.some((im) => im.video) && /找到|附上|下方|卡片/.test(finalText) && !/沒(有)?找到|找不到|沒有.{0,8}(影片|短片)/.test(finalText)) {
+          const names = [...new Set(videoPlaces.filter(Boolean))];
+          finalText = `這次沒有找到${CHINESE_ASK.test(trigger.text) ? "中文介紹的" : "相關的"}影片 🙇${names.length ? `可以直接在 IG 或 YouTube 搜尋「${names.join("」「")}」看看。` : ""}`;
+        }
         if (provider.id === "workers-ai" && !toolsUsed.includes("check_route_map") && ROUTE_ASK.test(trigger.text) && /線|轉乘|方向|站/.test(finalText)) finalText = `${finalText.trim()}\n\n${BACKUP_ROUTE_NOTE}`;
         // 憑記憶回答的路線：下方放查證按鈕（已經查證過、問延誤的不用）
         const quick =

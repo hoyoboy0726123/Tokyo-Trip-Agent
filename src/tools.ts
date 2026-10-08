@@ -403,7 +403,10 @@ async function placeVideos(key: string, country: string, city: string, p: ShortP
     : await collect(`${withArea(p.name_local)} ${p.category} ${reel}`, `${withArea(p.name_zh || p.name_local)} shorts`);
   // 找不太到：分店名、類別常讓搜尋跑偏（例如不存在的「池袋東口店」），改用店名本身＋地區再找一次，YouTube 這次不限 Shorts
   if (ok.length < 2 || (zh && ok.filter((h) => zhCaption(h.own)).length < 2)) {
-    const name = (zh && p.keywords.find((k) => !/[\u3040-\u30ff\uac00-\ud7af]/.test(k))) || p.keywords[0] || tokens[0] || p.name_local;
+    // 中文再找一次：優先用跟 name_zh 不同的中文俗稱（官方譯名「鱈魚岬烹飪坊」幾乎沒人用，台灣人叫「達菲餐廳」）
+    const isZhName = (k: string) => /[\u4e00-\u9fff]/.test(k) && !/[\u3040-\u30ff\uac00-\ud7af]/.test(k);
+    const name =
+      (zh && (p.keywords.find((k) => isZhName(k) && !p.name_zh.includes(k)) || p.keywords.find(isZhName))) || p.keywords[0] || tokens[0] || p.name_local;
     ok = [...ok, ...(await (zh ? collect(`${withArea(name)} ${country}`, `${withArea(name)} ${country} vlog`) : collect(`${withArea(name)} ${reel}`, withArea(name))))];
   }
   ok.sort(
@@ -412,8 +415,8 @@ async function placeVideos(key: string, country: string, city: string, p: ShortP
       Number(b.ok === true) - Number(a.ok === true) || Number(inArea(b.own)) - Number(inArea(a.own)) || Number(inPlace(b.own)) - Number(inPlace(a.own)) ||
       Number(b.short) - Number(a.short) || Number(!!b.vertical) - Number(!!a.vertical) || b.score - a.score,
   );
-  // 要中文的：有找到中文說明的就只留中文的（先挑中文，不然沒提到地名的中文影片會被下一步刷掉）
-  if (zh && ok.some((h) => zhCaption(h.own))) ok = ok.filter((h) => zhCaption(h.own));
+  // 要中文的：只留中文說明的；一支都沒有就是沒有，不拿其他語言的充數（先挑中文，不然沒提到地名的中文影片會被下一步刷掉）
+  if (zh) ok = ok.filter((h) => zhCaption(h.own));
   // 有 2 支以上確定講這裡（提到地區或城市）的，就只留這些
   if (ok.filter((h) => inPlace(h.own)).length >= 2) ok = ok.filter((h) => inPlace(h.own));
   return [...ok.filter((h) => h.platform === "Instagram").slice(0, 3), ...ok.filter((h) => h.platform === "YouTube").slice(0, 2)].slice(0, 4);
@@ -446,16 +449,15 @@ async function findShortVideos(args: any, key: string, country: string, city: st
     }
   }
   if (!videos.length) {
-    return { found: 0, summary, note: `沒找到確定跟這些地點有關的短片：照實說，建議成員直接在 IG 或 YouTube 搜尋「${places.map((p) => p.name_local).join("」「")}」。不要自己寫影片網址。` };
+    const what = language === "chinese" ? "中文介紹的影片" : "確定跟這些地點有關的短片";
+    return { found: 0, summary, note: `沒有找到${what}：直接照實說沒有，不要說找到了；可以建議成員自己在 IG 或 YouTube 搜尋「${places.map((p) => (language === "chinese" ? p.name_zh || p.name_local : p.name_local)).join("」「")}」。不要自己寫影片網址。` };
   }
   return {
     found: videos.length, summary, videos,
     language,
     note:
       "影片卡片（縮圖、標題、連結）已經自動顯示在回答下方。只講 summary 裡這次實際找的地點（0 支的照實說沒找到），不要提這次沒有找的地點；用一兩句話說大概在介紹什麼；絕對不要自己寫影片網址。IG 沒登入可能只能看幾支。" +
-      (language === "chinese"
-        ? (videos.some((v) => !zhCaption(v.title)) ? "這次沒找到中文介紹的影片，下面是當地語言的，要照實說。" : "這些是中文介紹的影片。")
-        : "成員想看中文介紹的，可以用 language=chinese 再找一次。") +
+      (language === "chinese" ? "這些是中文介紹的影片；summary 裡 0 支的地點要照實說沒有中文影片。" : "成員想看中文介紹的，可以用 language=chinese 再找一次。") +
       (videos.some((v) => !v.verified) ? "標「未確認」的是沒辦法確認還在不在的影片。" : ""),
   };
 }
@@ -1601,12 +1603,12 @@ export const TOOLS: Tool[] = [
               type: "object",
               properties: {
                 name_local: { type: "string", description: "當地語言的名稱（例如「一蘭 池袋」「浅草寺」「명동교자」）" },
-                name_zh: { type: "string", description: "中文名稱（例如「一蘭拉麵」「淺草寺」「明洞餃子」）" },
+                name_zh: { type: "string", description: "台灣人常用的中文名稱（例如「一蘭拉麵」「淺草寺」「明洞餃子」；官方譯名少人用時寫俗稱，例如「達菲餐廳」）" },
                 area: { type: "string", description: "地區（例如 池袋、明洞）；景點本身就是地名可以留空" },
                 category: { type: "string", description: "類別，用當地語言（例如 ラーメン、寺、맛집）" },
                 keywords: {
                   type: "array", items: { type: "string" },
-                  description: "相關影片的說明裡一定會出現的名稱：店名或景點名本身的各種寫法，不含地區和分店（例如 [\"一蘭\",\"Ichiran\"]、[\"仲見世\"]、[\"명동교자\",\"明洞餃子\"]）",
+                  description: "相關影片的說明裡一定會出現的名稱：店名或景點名本身的各種寫法，含台灣人常用的中文俗稱，不含地區和分店（例如 [\"一蘭\",\"Ichiran\"]、[\"仲見世\"]、[\"명동교자\",\"明洞餃子\"]、[\"Cape Cod Cook-Off\",\"鱈魚岬\",\"達菲餐廳\"]）",
                 },
               },
               required: ["name_local", "keywords"],
