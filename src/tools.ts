@@ -33,6 +33,8 @@ export interface RoomApi {
     catalog: { id: string; when: string; by: string; kind: string; note: string }[];
   }>;
   /** 只根據路線圖回答怎麼搭（Gemini 看圖；不能用就回 null） */
+  /** 請 AI 判斷一件事、只回 JSON（例如影片是不是在講這個地點）；AI 不能用就回 null */
+  aiJson(prompt: string): Promise<any | null>;
   readRouteMap(image: { bytes: ArrayBuffer; mime: string }, origin: string, destination: string, city: string, proposal?: string): Promise<ReturnType<typeof cleanRouteMap> | null>;
   documentFolder(name: string, author: string): number | null;
   cacheGet(key: string, maxAgeMs: number): string | null;
@@ -335,94 +337,101 @@ async function tavilyVideos(key: string, query: string, domains: string[]) {
 /** 中文說明（繁體、簡體都算）：中文常用字比平假名多（日本人寫的說明平假名很多；店名的片假名不算） */
 export const zhCaption = (t: string) => (t.match(/[的是我們们這这很超吃喝好推薦荐必在了嗎吗吧呢也都就還还真]/g) ?? []).length > (t.match(/[\u3041-\u309f]/g) ?? []).length;
 
-/** 只是料理或類別、不是店名（「池袋串燒」的「串燒」） */
-const GENERIC_FOOD = /^(串燒|串焼き?|焼き?鳥|燒鳥|やきとり|居酒屋|美食|グルメ|拉麵|拉面|ラーメン|燒肉|烤肉|焼肉|壽司|寿司|すし|咖啡|カフェ|甜點|スイーツ|餐廳|レストラン|맛집|小吃|夜景|景點|觀光|購物|逛街|美食街|食べ歩き)$/;
-
-/** 別的國家、地區（中文創作者常拍台灣、香港分店；港幣、台幣「460元」、.hk 帳號也算；日圓寫「円」「日圓」不會中） */
-const ELSEWHERE = /全台|台灣|臺灣|台北|臺北|新北|台中|臺中|台南|臺南|高雄|新竹|桃園|香港|澳門|\.hk\b|hk\$|nt\$|\d+\s*元|紐約|ニューヨーク|\bnyc?\b|アメリカ(?!ン)|美國(?!海濱)|新加坡|馬來西亞|吉隆坡|上海|北京|深圳|廣州|曼谷/i;
-/** 同一個國家的其他大城市（連鎖店別的分店）；千葉不算：迪士尼、成田機場都在千葉，東京行程常去 */
-const OTHER_CITIES: [RegExp, RegExp][] = [
-  [/日本/, /大阪|梅田|難波|京都|名古屋|福岡|博多|札幌|仙台|神戸|神戶|横浜|橫濱|柏市|埼玉|大宮|沖縄|沖繩|那覇|広島|廣島|金沢|金澤/],
-  [/韓/, /釜山|부산|대구|大邱|濟州|済州|제주|인천|仁川|광주|光州/],
-];
-
 type ShortPlace = { name_local: string; name_zh: string; area: string; category: string; keywords: string[] };
 
-/** 一個地點的短片：IG、YouTube 同時查；過濾掉不是單支影片、跟地點無關、已刪除的；IG 最多 3 支、YouTube 最多 2 支，合計 4 支 */
-async function placeVideos(key: string, country: string, city: string, p: ShortPlace, lang: "local" | "chinese") {
+/**
+ * 請 AI 判斷候選影片是不是在介紹這個地點（同一家店、這個城市的分店、同一個景點）。
+ * 用語意判斷，不靠地名清單：別處分店、同名但不同的東西、只是順帶提到的都不算。AI 不能用就回 null
+ */
+async function judgeVideos(room: RoomApi, p: ShortPlace, country: string, city: string, list: { own: string; author?: string }[]): Promise<Set<number> | null> {
+  if (!list.length) return new Set();
+  const names = [...new Set([p.name_zh, p.name_local, ...p.keywords].filter(Boolean))].join("／");
+  const where = [country, city, p.area].filter(Boolean).join(" ");
+  const prompt = `家庭旅遊 App 要找「${names}」（${p.category || "地點"}，位在 ${where}）的介紹短片。
+下面是搜尋到的影片說明，請判斷哪些是在介紹這個地點本身：
+- 算：介紹這家店或這個景點；連鎖店要是這個城市的分店，或沒講是哪間分店；如果名稱只是「地區＋料理或類別」這種泛稱，要是在這個地區的同類店家
+- 不算：別的城市或國家的分店、名字相同但其實是別的東西（例如同名的歌曲、商品）、只是順帶提到、跟這個地點無關
+只輸出 JSON：{"keep": [符合的編號]}
+
+${list.map((h, i) => `${i}. ${h.own.replace(/\s+/g, " ").slice(0, 300)}${h.author ? `（@${h.author}）` : ""}`).join("\n")}`;
+  const j = await room.aiJson(prompt);
+  if (!j || !Array.isArray(j.keep)) return null;
+  return new Set(j.keep.map(Number).filter((n: number) => Number.isInteger(n) && n >= 0 && n < list.length));
+}
+
+/** 一個地點的短片：IG、YouTube 同時查，確認影片還在，再請 AI 判斷是不是在講這個地點；IG 最多 3 支、YouTube 最多 2 支，合計 4 支 */
+async function placeVideos(room: RoomApi, key: string, country: string, city: string, p: ShortPlace, lang: "local" | "chinese") {
   const zh = lang === "chinese";
   const reel = /韓/.test(country) ? "릴스" : /日本/.test(country) ? "リール" : "reels";
   const withArea = (name: string) => [name, p.area && !name.includes(p.area) ? p.area : ""].filter(Boolean).join(" ");
-  // 店名或景點名本身要出現在影片說明裡：用 AI 給的 keywords；沒有就從名稱去掉地區和分店（「池袋店」「駅前店」）
+  // 店名本身（AI 給的 keywords 加上名稱去掉地區、分店）：用來排候選的先後，AI 不能用時也拿來比對
   const branch = /(店|駅|站|역|점|口|前)$/;
   const tokens = [p.name_local, p.name_zh].flatMap((n) => n.split(/[\s　]+/)).filter((t) => t && !(p.area && t.includes(p.area)) && !branch.test(t));
-  // 比對名稱：AI 給的 keywords 加上店名本身（keywords 常常只有英文、中文，日本人的說明寫的是日文店名）
-  const names = [...new Set([...p.keywords, ...tokens])].map((k) => (p.area ? k.split(p.area).join("").trim() : k) || k);
-  const cores = names.map(textKey).filter((n) => n.length >= 2);
+  const cores = [...new Set([...p.keywords, ...tokens])].map((k) => textKey((p.area ? k.split(p.area).join("").trim() : k) || k)).filter((n) => n.length >= 2);
+  const named = (t: string) => cores.some((c) => textKey(t).includes(c));
   const inArea = (t: string) => !!p.area && textKey(t).includes(textKey(p.area));
-  // 「池袋串燒」這種泛稱（只有料理或類別、沒有店名）：影片也要提到地區，不然會找到別的城市，甚至「金曲串燒」這種歌
-  const generic = names.length > 0 && names.every((n) => GENERIC_FOOD.test(n.replace(/\s+/g, "")));
-  const relevant = (t: string) => cores.some((c) => textKey(t).includes(c)) && (!generic || !p.area || inArea(t));
+  const inPlace = (t: string) => inArea(t) || (!!city && textKey(t).includes(textKey(city)));
   const seen = new Set<string>();
-  // IG 只限 /reel 路徑才不會混進圖文貼文；YouTube 只限網域（限定 /shorts 反而不準）
+  // 找候選：IG 只限 /reel 路徑；YouTube 只限網域，網址只收 /shorts/；說明裡有店名的先確認
   const collect = async (igQuery: string, ytQuery: string) => {
-    const [ig, yt] = await Promise.all([
-      tavilyVideos(key, igQuery.replace(/\s+/g, " "), ["instagram.com/reel"]),
-      tavilyVideos(key, ytQuery, ["youtube.com"]),
-    ]);
+    const [ig, yt] = await Promise.all([tavilyVideos(key, igQuery.replace(/\s+/g, " "), ["instagram.com/reel"]), tavilyVideos(key, ytQuery, ["youtube.com"])]);
     const hits = [...ig, ...yt].flatMap((r) => {
       const v = videoOf(r.url);
       if (!v || seen.has(v.id)) return [];
       seen.add(v.id);
-      // Tavily 有時只抓到 IG 的登入頁，看不出內容，要等 oEmbed 拿到說明再比對
+      // Tavily 有時只抓到 IG 的登入頁，看不出內容，要等 oEmbed 拿到說明
       const login = /^instagram$/i.test(r.title.trim()) || /^(log ?in|sign ?up|ログイン|로그인)/i.test(r.content.trim());
       // YouTube 有些影片在這裡播不了（oEmbed 還是會回成功）
       if (/content isn.t available|この動画は再生できません/i.test(r.content)) return [];
       return [{ ...v, text: `${r.title} ${r.content}`, head: r.title, login, score: r.score }];
-    }).filter((h) => h.login || relevant(h.text));
-    const pick = [...hits.filter((h) => h.platform === "Instagram").slice(0, 5), ...hits.filter((h) => h.platform === "YouTube").slice(0, 3)];
+    });
+    const rank = (list: typeof hits) => [...list].sort((a, b) => Number(named(b.text)) - Number(named(a.text)) || b.score - a.score);
+    const pick = [...rank(hits.filter((h) => h.platform === "Instagram")).slice(0, 6), ...rank(hits.filter((h) => h.platform === "YouTube")).slice(0, 4)];
     const checked = await Promise.all(pick.map(async (h) => ({ ...h, ...(await checkVideo(h)) })));
     // Tavily 的說明常混進別頁的內容：確認存在的只看平台回傳的影片說明；沒辦法確認的只看 Tavily 的標題
     return checked
       .map((h) => ({ ...h, own: h.ok === true ? `${h.title ?? ""} ${h.login ? "" : h.head}` : h.head }))
-      .filter((h) => (h.ok === true || (h.ok === null && !h.login)) && relevant(h.own))
-      // 連鎖店別處分店的影片（香港、台灣、紐約、其他城市）：提到別處的，要明確提到這次的地區才留（「東京發祥、NY 上陸」只提到城市不算）
-      .filter((h) => !elsewhere(`${h.own} ${h.author ?? ""}`) || inArea(h.own));
+      .filter((h) => h.ok === true || (h.ok === null && !h.login))
+      // 要中文的：只留中文說明的（一支都沒有就是沒有，不拿其他語言的充數）
+      .filter((h) => !zh || zhCaption(h.own));
   };
-  // 影片有提到這次的地區或城市；或講的是別的國家、同國其他城市（連鎖店別的分店）
-  const inPlace = (t: string) => inArea(t) || (!!city && textKey(t).includes(textKey(city)));
-  const here = `${country}${city}${p.area}`;
-  const others = OTHER_CITIES.find(([c]) => c.test(country))?.[1];
-  const elsewhere = (t: string) => (ELSEWHERE.test(t) && !ELSEWHERE.test(here)) || (!!others && others.test(t) && !others.test(here));
-  // 第一次：當地人拍的用當地語言＋地區＋類別找 IG、中文＋shorts 找 YouTube；
-  // 中文影片用中文名＋國家名找（加國家名才不會找到台灣分店）
+  // 是不是在講這個地點：交給 AI；AI 不能用就退回「說明裡有店名」
+  let judged = true;
+  const judge = async (list: Awaited<ReturnType<typeof collect>>) => {
+    const keep = await judgeVideos(room, p, country, city, list);
+    if (keep) return list.filter((_, i) => keep.has(i));
+    judged = false;
+    return list.filter((h) => named(h.own));
+  };
+  // 第一次：當地語言用當地名稱＋地區＋類別找 IG、名稱＋shorts 找 YouTube；中文用中文名＋國家名找（加國家名才不會找到台灣分店）
   const zhName = withArea(p.name_zh || p.name_local);
-  let ok = zh
-    ? await collect(`${zhName} ${country}`, `${zhName} ${country} shorts`)
-    : await collect(`${withArea(p.name_local)} ${p.category} ${reel}`, `${withArea(p.name_zh || p.name_local)} shorts`);
-  // 找不太到：分店名、類別常讓搜尋跑偏（例如不存在的「池袋東口店」），改用店名本身＋地區再找一次
-  if (ok.length < 2 || (zh && ok.filter((h) => zhCaption(h.own)).length < 2)) {
-    // 中文再找一次：優先用跟 name_zh 不同的中文俗稱（官方譯名「鱈魚岬烹飪坊」幾乎沒人用，台灣人叫「達菲餐廳」）
+  let ok = await judge(
+    zh
+      ? await collect(`${zhName} ${country}`, `${zhName} ${country} shorts`)
+      : await collect(`${withArea(p.name_local)} ${p.category} ${reel}`, `${withArea(p.name_zh || p.name_local)} shorts`),
+  );
+  // 找不太到：分店名、類別、少人用的譯名常讓搜尋跑偏，改用店名本身（中文優先用俗稱）＋地區再找一次
+  if (ok.length < 2) {
     const isZhName = (k: string) => /[\u4e00-\u9fff]/.test(k) && !/[\u3040-\u30ff\uac00-\ud7af]/.test(k);
     const name =
       (zh && (p.keywords.find((k) => isZhName(k) && !p.name_zh.includes(k)) || p.keywords.find(isZhName))) || p.keywords[0] || tokens[0] || p.name_local;
-    ok = [...ok, ...(await (zh ? collect(`${withArea(name)} ${country}`, `${withArea(name)} ${country} shorts`) : collect(`${withArea(name)} ${reel}`, `${withArea(name)} shorts`)))];
+    ok = [
+      ...ok,
+      ...(await judge(await (zh ? collect(`${withArea(name)} ${country}`, `${withArea(name)} ${country} shorts`) : collect(`${withArea(name)} ${reel}`, `${withArea(name)} shorts`)))),
+    ];
   }
   ok.sort(
     (a, b) =>
-      (zh ? Number(zhCaption(b.own)) - Number(zhCaption(a.own)) : 0) ||
       Number(b.ok === true) - Number(a.ok === true) || Number(inArea(b.own)) - Number(inArea(a.own)) || Number(inPlace(b.own)) - Number(inPlace(a.own)) ||
       Number(!!b.vertical) - Number(!!a.vertical) || b.score - a.score,
   );
-  // 要中文的：只留中文說明的；一支都沒有就是沒有，不拿其他語言的充數（先挑中文，不然沒提到地名的中文影片會被下一步刷掉）
-  if (zh) ok = ok.filter((h) => zhCaption(h.own));
-  // 有 2 支以上確定講這裡（提到地區或城市）的，就只留這些
-  if (ok.filter((h) => inPlace(h.own)).length >= 2) ok = ok.filter((h) => inPlace(h.own));
+  // AI 不能用時：有 2 支以上提到這次地區或城市的，就只留這些（少一點別處分店）
+  if (!judged && ok.filter((h) => inPlace(h.own)).length >= 2) ok = ok.filter((h) => inPlace(h.own));
   return [...ok.filter((h) => h.platform === "Instagram").slice(0, 3), ...ok.filter((h) => h.platform === "YouTube").slice(0, 2)].slice(0, 4);
 }
 
 /** find_short_videos：每個地點找 IG Reels、YouTube Shorts，影片卡片附在回答下方（網址不經過模型，不會是編的） */
-async function findShortVideos(args: any, key: string, country: string, city: string, env: Env, attachImage?: (img: AttachedImage) => void) {
+async function findShortVideos(args: any, key: string, country: string, city: string, env: Env, room: RoomApi, attachImage?: (img: AttachedImage) => void) {
   if (!key) return { error: "沒有設定 Tavily 搜尋金鑰，沒辦法找短片" };
   const s = (v: unknown, n = 40) => String(v ?? "").trim().slice(0, n);
   const places: ShortPlace[] = (Array.isArray(args.places) ? args.places : [])
@@ -434,7 +443,7 @@ async function findShortVideos(args: any, key: string, country: string, city: st
     .filter((p: ShortPlace) => p.name_local);
   if (!places.length) return { error: "請提供要找短片的地點或店家名稱" };
   const language = args.language === "chinese" ? "chinese" : "local";
-  const found = await Promise.all(places.map((p) => placeVideos(key, country, city, p, language)));
+  const found = await Promise.all(places.map((p) => placeVideos(room, key, country, city, p, language)));
   // 每個地點各找到幾支：模型常把沒找的地點也寫進回答，要它照這個講
   const summary = places.map((p, i) => `${p.name_zh || p.name_local}：${found[i].length} 支`);
   const videos: { place: string; platform: string; title: string; author: string; verified: boolean }[] = [];
@@ -1622,8 +1631,8 @@ export const TOOLS: Tool[] = [
         required: ["places"],
       },
     },
-    async run(args, { env, attachImage }) {
-      return findShortVideos(args, env.TAVILY_API_KEY ?? "", "日本", "東京", env, attachImage);
+    async run(args, { env, room, attachImage }) {
+      return findShortVideos(args, env.TAVILY_API_KEY ?? "", "日本", "東京", env, room, attachImage);
     },
   },
   {

@@ -255,7 +255,7 @@ function routeCheckButton(question: string) {
 }
 
 /** 問景點、美食、餐廳：回答下方放「找相關短片」按鈕（關鍵字沒中、AI 自己判斷要查時，find_short_videos 照樣能用） */
-const PLACE_ASK = /好吃|美食|餐廳|吃|喝|拉麵|燒肉|串燒|燒鳥|居酒屋|燒烤|火鍋|壽司|丼|定食|早餐|午餐|晚餐|宵夜|咖啡|甜點|小吃|酒吧|景點|好玩|推薦|必去|必逛|逛街|購物|百貨|伴手禮|夜市|市場|商圈|神社|寺|公園|博物館|美術館|樂園|展望台|晴空塔|迪士尼|值得去/;
+const PLACE_ASK = /好吃|美食|餐廳|吃|喝|拉麵|燒肉|串燒|燒鳥|居酒屋|燒烤|火鍋|壽司|丼|定食|早餐|午餐|晚餐|宵夜|咖啡|甜點|小吃|酒吧|景點|好玩|推薦|必去|必逛|逛街|購物|百貨|伴手禮|夜市|市場|商圈|神社|寺|公園|博物館|美術館|樂園|展望台|值得去/;
 /** 回答說找了影片、或叫成員自己去搜影片，卻沒呼叫 find_short_videos：提醒它真的去找（不管成員怎麼問） */
 const VIDEO_CLAIM = /(找|搜尋|搜|查|看|整理|附上|提供).{0,15}(影片|短片|shorts|reels)|(影片|短片|shorts|reels).{0,10}(如下|在下方|附在|供您|給您|參考)/i;
 /** 回答裡推薦了地點（地圖連結）：2 個以上就算在介紹地方，也放「找相關短片」按鈕 */
@@ -1559,6 +1559,26 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
 - 住宿：${TRIP.accommodation.name}，${TRIP.accommodation.nearestStation}`;
     const text = await this.generatePlain(this.systemPrompt(), prompt);
     this.postAiMessage(`☀️ **早安！${date.slice(5).replace("-", "/")} 早報**\n\n${text}`, { kind: "brief" });
+  }
+
+  /** 工具請 AI 判斷一件事（例如影片是不是在講這個地點）：JSON 模式，Gemini 不能用就換 Gemma，都不能用回 null */
+  async aiJson(prompt: string): Promise<any | null> {
+    const order = this.settings().hasGemini ? ["gemini", "gemini-backup", "workers-ai"] : ["workers-ai"];
+    for (const pid of order) {
+      try {
+        const gate = pid === "workers-ai" ? undefined : this.geminiGate(1, 10_000, undefined, pid === "gemini-backup");
+        const r = await providerFor(await this.aiEnv(), pid, gate).generate({
+          system: "你只輸出 JSON。",
+          turns: [{ role: "user", parts: [{ text: prompt }] }],
+          json: true,
+          timeoutMs: 20_000,
+        });
+        return parseArgs(r.text.replace(/^\s*```(?:json)?|```\s*$/g, "").trim());
+      } catch (e) {
+        if (!(e instanceof RateLimitedError)) console.error(`aiJson via ${pid} failed`, e);
+      }
+    }
+    return null;
   }
 
   /** 只根據路線圖回答怎麼搭（check_route_map 用）；密密麻麻的路線圖只有 Gemini 看得清楚，不能用就回 null */
