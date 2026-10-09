@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { decryptText, encryptText, maskKey, safeEqual } from "./auth";
 import { geminiProvider, parseArgs, providerFor, validateGemini, type GeminiGate } from "./providers";
 import { GeminiLimiter, RateLimitedError } from "./ratelimit";
-import { cleanRouteMap, routeMapPrompt, zhCaption, DRAFT_TOOLS, japanAlerts, reverseArea, runTool, SCALE_TEXT, toolLabel, TOOL_DECLS, type AttachedImage, type DraftInput, type ExpenseInput, type RoomApi } from "./tools";
+import { cleanRouteMap, routeMapPrompt, zhCaption, HOME_NAMES, DRAFT_TOOLS, japanAlerts, reverseArea, runTool, SCALE_TEXT, toolLabel, TOOL_DECLS, type AttachedImage, type DraftInput, type ExpenseInput, type RoomApi } from "./tools";
 import { fixMapLinks, type MapFixOptions } from "./maplinks";
 import { renderDiaryPage } from "./diary-page";
 import { looksJapanese, translate, type Lang } from "./translate";
@@ -135,7 +135,7 @@ function photoRows<T extends { photo_id: string | null; meta: string | null }>(m
 /** 一則訊息最多幾張照片（菜單好幾頁一起翻譯；再多 AI 的回答會太長、容易漏） */
 const MAX_PHOTOS = 6;
 
-/** 自己拍、傳到聊天室的照片（「第一天的照片」「我們在晴空塔的合照」「小佑傳的照片」）要翻聊天室，不是上網找 */
+/** 自己拍、傳到聊天室的照片（「第一天的照片」「我們在晴空塔的合照」「小明傳的照片」）要翻聊天室，不是上網找 */
 const OWN_PHOTO = /(我們|我的|我傳|我拍|大家|全家|家人|自己|第\s*[一二三四五六七八九十\d]+\s*天|今天|昨天|前天|那天|這幾天|\d{1,2}\s*[\/／月]\s*\d{1,2}|傳過|傳的|傳了|拍的|拍過|拍了|上傳).{0,12}(照片|相片|合照)|(照片|相片|合照).{0,8}(我們|大家|傳過|拍的|傳的)/;
 
 const PHOTO_SYNONYMS: [RegExp, string][] = [
@@ -182,10 +182,8 @@ function expenseBrief(r: Record<string, SqlStorageValue>) {
   return { id: r.id as number, date: r.date as string, description: r.description as string, amount: r.amount as number, currency: r.currency as string, payer: r.payer as string };
 }
 
-/** 民宿的專有寫法（房源名稱、地址、大樓名），出現在地圖連結裡就換成正確的位置 */
-const HOME_NAMES = /IKEBUKURO\s*4|要町\s*1-44-8|1-44-8|セレッソ|Seresso/i;
-/** 導航用的民宿地址（不含郵遞區號與大樓名，Google 地圖最穩） */
-const HOME_ADDRESS = "東京都豊島区要町1-44-8";
+/** 導航用的民宿地址（不含郵遞區號與大樓名，Google 地圖最穩）；房源名稱等專有寫法見 tools 的 HOME_NAMES */
+const HOME_ADDRESS = TRIP.accommodation.navAddress;
 
 /** 記憶超過幾條就改成只挑相關的、挑幾條（跟通用版的個人助理一樣） */
 const MEMORY_ALL = 40;
@@ -2251,7 +2249,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 提到日圓價格時附上約合台幣（用 convert_currency）。
 - 問路、問地鐵電車怎麼搭：照你知道的回答坐哪條線、往哪個方向、在哪轉乘（不要寫站數），最後用 plan_route 附 Google 地圖連結，提醒即時班次和月台以 Google 地圖為準；必要時用 web_search 補充轉乘與票價。成員問坐幾站、或要你查證／確認路線時，才用 check_route_map（官方路線圖優先），照它回傳的 routes 回答、寫出依據的路線圖（圖會附在回答下方）；呼叫時把你認為的搭法填在 legs 讓它核對；它沒找到可靠的圖，就說沒查到可以查證的路線圖，請大家看 Google 地圖。沒有用 check_route_map 時，不要說「依據路線圖」或「路線圖附在下方」。成員自己傳路線圖、時刻表或車站照片來問時，照照片上清楚看得到的內容回答。
 - 用 web_search 查交通、票價、營業時間、規定時，優先採用官方網站（營運公司、政府、景點官網）的資料，找不到官方的才用其他網站，並註明來源。
-- 民宿的位置一律用房東給的地圖連結 ${a.googleMap}；要帶路回民宿就用 plan_route，destination 填「民宿」。不要用「IKEBUKURO 4」或自己打的地址搜尋（會跑到池袋四丁目或錯的地方）。
+- 民宿的位置一律用房東給的地圖連結 ${a.googleMap}；要帶路回民宿就用 plan_route，destination 填「民宿」。不要用房源名稱「${a.name}」或自己打的地址搜尋（常會跑到錯的地方）。
 - 地圖連結：工具回傳的連結可以直接用（find_nearby 給的是那家店的座標，照抄，不要改成店名搜尋，連鎖店用店名會跑到別家分店）；其他地點一律寫成 [📍地點名稱](map)，系統會自動換成 Google 地圖搜尋連結（地點名稱用日文或英文的正式名稱，連鎖店要加分店名，例如 [📍ドン・キホーテ 池袋駅西口店](map)）。不要自己寫 Google 地圖網址，絕對不要編 maps.app.goo.gl 短網址，也不要用自己記得的地址或座標當連結（記錯一個字就會指到別的地方）。
 - 成員在哪裡，一律以「成員最近位置」或訊息裡附的地名為準，絕對不要自己猜地名；以前聊天裡說過的位置可能已經過時，不要沿用。
 - 每次有人問「附近」都要重新呼叫工具查詢，不可以沿用之前的回答。
@@ -2274,7 +2272,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 安全第一：遇到緊急狀況提供日本緊急電話（警察 110、救護/消防 119）與最近的醫院資訊。`;
   }
 
-  /** 地圖連結修正：房東給的民宿地圖保留；提到民宿的連結一律換成正確的位置與地址（用房源名稱「IKEBUKURO 4」搜尋會跑到池袋四丁目） */
+  /** 地圖連結修正：房東給的民宿地圖保留；提到民宿的連結一律換成正確的位置與地址（用房源名稱搜尋常會跑到別的地方） */
   private mapFix(): MapFixOptions {
     const a = TRIP.accommodation;
     return { keep: [a.googleMap], home: { names: HOME_NAMES, search: a.googleMap, dest: HOME_ADDRESS } };

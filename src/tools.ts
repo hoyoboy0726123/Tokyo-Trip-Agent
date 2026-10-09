@@ -105,9 +105,13 @@ export interface DraftInput {
 
 const REPLACES_PARAM = { type: "integer", description: "修正還沒確認的卡片時，填那張卡片的編號（見系統提示「等待成員確認的卡片」）" };
 
-/** 民宿：模型寫「民宿」「IKEBUKURO 4」或自己打的地址常跑錯地方，一律換成正確地址 */
-const HOME_ADDRESS = "東京都豊島区要町1-44-8";
-const HOME_ALIAS = /^(我們的?|回)?(民宿|住宿|住的地方|飯店|旅館|airbnb)$|IKEBUKURO\s*4|要町\s*1-44-8|セレッソ|Seresso/i;
+/** 住宿的專有寫法（房源名稱、地址、大樓名，見 trip-data 的 aliases）做成比對用的 regex（空白可有可無）；沒設定就永遠比不到 */
+export const HOME_NAMES = TRIP.accommodation.aliases.length
+  ? new RegExp(TRIP.accommodation.aliases.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s*")).join("|"), "i")
+  : /$^/;
+/** 民宿：模型寫「民宿」、房源名稱或自己打的地址常跑錯地方，一律換成正確地址 */
+const HOME_ADDRESS = TRIP.accommodation.navAddress;
+const HOME_ALIAS = new RegExp(`^(我們的?|回)?(民宿|住宿|住的地方|飯店|旅館|airbnb)$|${HOME_NAMES.source}`, "i");
 function homeOr(place: string): string {
   return HOME_ALIAS.test(place.trim()) ? HOME_ADDRESS : place;
 }
@@ -907,7 +911,7 @@ export const TOOLS: Tool[] = [
     label: "🌤 查天氣",
     decl: {
       name: "get_weather",
-      description: "查詢天氣預報（未來最多 14 天）與目前天氣。沒給地點就查住宿附近（池袋・要町）。",
+      description: `查詢天氣預報（未來最多 14 天）與目前天氣。沒給地點就查住宿附近（${TRIP.accommodation.area}）。`,
       parameters: {
         type: "object",
         properties: {
@@ -917,7 +921,7 @@ export const TOOLS: Tool[] = [
       },
     },
     async run(args) {
-      let loc = { name: "要町（住宿）", lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon };
+      let loc = { name: `${TRIP.accommodation.area}（住宿）`, lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon };
       if (args.place) {
         const g = await locate(String(args.place));
         if (g) loc = g;
@@ -1040,7 +1044,7 @@ export const TOOLS: Tool[] = [
         center = { lat: mine.lat, lon: mine.lon, label: `${mine.name} 的 GPS 位置${where}（${Math.round((Date.now() - mine.ts) / 60000)} 分鐘前）` };
       }
       if (!center) {
-        center = { lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon, label: "住宿（要町）" };
+        center = { lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon, label: `住宿（${TRIP.accommodation.area}）` };
         note ||= "沒有成員分享位置，先以住宿為中心；要找自己附近請先按 📍 分享位置";
       }
       const r = Math.min(Math.max(Number(args.radius_m) || 600, 100), 2000);
@@ -1424,7 +1428,7 @@ export const TOOLS: Tool[] = [
       if (args.from) from = await locate(String(args.from));
       if (!from) {
         const mine = recentLocation(room, author);
-        from = mine ? { name: mine.area || "目前位置", lat: mine.lat, lon: mine.lon } : { name: "住宿（要町）", lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon };
+        from = mine ? { name: mine.area || "目前位置", lat: mine.lat, lon: mine.lon } : { name: `住宿（${TRIP.accommodation.area}）`, lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon };
       }
       const to = await locate(String(args.to));
       if (!to) return { error: `找不到「${args.to}」，請用日文地名再試` };
@@ -1746,7 +1750,7 @@ export const TOOLS: Tool[] = [
     decl: {
       name: "find_chat_photos",
       description:
-        "找大家自己拍、傳到這個聊天室的照片，照片會直接顯示在回答下方。例如「第一天的照片」「昨天吃拉麵的照片」「小佑傳的照片」「我們在晴空塔的合照」。" +
+        "找大家自己拍、傳到這個聊天室的照片，照片會直接顯示在回答下方。例如「第一天的照片」「昨天吃拉麵的照片」「小明傳的照片」「我們在晴空塔的合照」。" +
         "要看沒去過的地方、店家、料理長什麼樣（網路圖片）才用 find_images。",
       parameters: {
         type: "object",
