@@ -246,6 +246,15 @@ const ROUTE_VERIFY = new RegExp(`幾站|站數|${CHECK_WORD}.{0,20}${ROUTE_WORD}
 
 /** 問交通路線（要真的在問怎麼搭、怎麼去；只提到「地鐵站出來」這類不算）：查證按鈕、備援模型加註用 */
 const ROUTE_ASK = /(怎麼|如何).{0,8}(去|到|搭|坐|走)|交通(?![卡費])|路線|轉乘|換車|換線|幾站|(搭|坐).{0,6}(線|車)|(地鐵|捷運|電車|JR|新幹線|巴士|公車).{0,6}(怎麼|如何|哪|幾|要搭|要坐|轉)|從.{1,15}(到|去)/;
+/** 回答裡有搭車步驟（搭哪條線、往哪個方向、在哪站下車）：不管問法，都要附 Google 導航連結和查證按鈕 */
+const ROUTE_STEP = /(搭乘?|坐|轉乘|換乘|轉車).{0,15}(線|號|列車|地鐵|電車|捷運|巴士|公車|新幹線|單軌|輕軌|鐵道)|往.{1,12}方向|(在|於|到).{1,15}(下車|轉乘|換車)|下車|(搭乘?|坐|轉乘|換乘).{0,20}(到|至).{1,12}站/g;
+function routeAnswer(text: string): boolean {
+  return (text.match(ROUTE_STEP) ?? []).length >= 2;
+}
+/** 要放查證按鈕的路線回答：有搭車步驟，或已經附了 Google 大眾運輸導航連結 */
+function routeReply(text: string): boolean {
+  return routeAnswer(text) || /google\.com\/maps\/dir\/[^)\s]*travelmode=transit/.test(text);
+}
 const BACKUP_ROUTE_NOTE = "⚠️ 這次由備援模型回答，路線的方向和轉乘可能不準，出發前請以 Google 地圖為準。";
 
 /** 憑記憶回答的路線：回答下方放查證按鈕，按了才去找路線圖（送出的問題帶著原本的問題，放久了再按也查得對） */
@@ -2376,6 +2385,8 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
             let need = requiredTool(trigger.text, toolsUsed, !!trigger.photo_id);
             // 嘴上說找了影片（或叫成員自己去搜影片）卻沒呼叫工具：關鍵字沒中也要它真的去找
             if (!need && !toolsUsed.includes("find_short_videos") && VIDEO_CLAIM.test(res.text)) need = "find_short_videos";
+            // 回答裡有搭車步驟卻沒用 plan_route：要它用工具產生 Google 導航連結（模型自己手寫的網址常把站名編碼錯，例如「新木巴駅」）
+            if (!need && routeAnswer(res.text) && !toolsUsed.includes("plan_route") && !toolsUsed.includes("check_route_map")) need = "plan_route";
             // 要寫入資料的工具：AI 正在反問成員（日期不在旅遊期間、金額看不清…）就讓它問，不要蓋掉硬寫
             if (need && DRAFT_TOOLS.has(need) && isAskingBack(res.text)) need = null;
             if (need && !nudged.has(need) && step < MAX_STEPS - 1) {
@@ -2462,10 +2473,10 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
           const names = [...new Set(videoPlaces.filter(Boolean))];
           finalText = `這次沒有找到${CHINESE_ASK.test(trigger.text) ? "中文介紹的" : "相關的"}影片 🙇${names.length ? `可以直接在 IG 或 YouTube 搜尋「${names.join("」「")}」看看。` : ""}`;
         }
-        if (provider.id === "workers-ai" && !toolsUsed.includes("check_route_map") && ROUTE_ASK.test(trigger.text) && /線|轉乘|方向|站/.test(finalText)) finalText = `${finalText.trim()}\n\n${BACKUP_ROUTE_NOTE}`;
+        if (provider.id === "workers-ai" && !toolsUsed.includes("check_route_map") && (ROUTE_ASK.test(trigger.text) || routeAnswer(finalText)) && /線|轉乘|方向|站/.test(finalText)) finalText = `${finalText.trim()}\n\n${BACKUP_ROUTE_NOTE}`;
         // 憑記憶回答的路線：下方放查證按鈕（已經查證過、問延誤的不用）
         const quick =
-          !toolsUsed.includes("check_route_map") && !trigger.photo_id && ROUTE_ASK.test(trigger.text) && !/延誤|停駛|誤點|運行/.test(trigger.text) && /線|轉乘|方向|站/.test(finalText)
+          !toolsUsed.includes("check_route_map") && !trigger.photo_id && (ROUTE_ASK.test(trigger.text) || routeReply(finalText)) && !/延誤|停駛|誤點|運行/.test(trigger.text) && /線|轉乘|方向|站/.test(finalText)
             ? routeCheckButton(trigger.text)
             : !toolsUsed.includes("find_short_videos") && !trigger.photo_id && finalText.length > 80 && (PLACE_ASK.test(trigger.text) || (finalText.match(PLACE_LINK) ?? []).length >= 2)
               ? videoButton(trigger.text)
@@ -2555,7 +2566,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
       const now = jstNow();
       try {
         const parts: Part[] = [{
-          text: `成員（${user.name}）說：「${trigger.text}」${need === "find_short_videos" ? `\n上一則 AI 回答：\n${([...history].reverse().find((m) => m.role === "assistant" && m.id !== id)?.text ?? "").slice(0, 1500)}` : ""}
+          text: `成員（${user.name}）說：「${trigger.text}」${need === "find_short_videos" || need === "plan_route" ? `\n上一則 AI 回答：\n${([...history].reverse().find((m) => m.role === "assistant" && m.id !== id)?.text ?? "").slice(0, 1500)}` : ""}
 現在是東京時間 ${now.date}（${now.weekday}）${now.time}。旅程 ${TRIP.startDate} 到 ${TRIP.endDate}（第一天＝${TRIP.startDate}）。旅伴名單：${this.members().join("、") || user.name}。
 請產生呼叫工具「${need}」要用的參數。
 工具說明：${decl.description}
