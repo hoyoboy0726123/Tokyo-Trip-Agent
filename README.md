@@ -20,7 +20,7 @@
 | 🌤 天氣 | Open-Meteo 14 天預報 |
 | 🏰 迪士尼 | 樂園／海洋即時排隊時間（Queue-Times） |
 | 🗺 附近 | 餐廳、便利商店、藥妝、廁所、ATM、置物櫃…（OpenStreetMap） |
-| 🚃 路線 | 產生 Google Maps 導航連結 |
+| 🚃 路線 | 產生 Google Maps 導航連結；設定裡可開啟「精確轉乘查詢」（[Transitous](https://transitous.org/sources/)，預設關閉），回答實際班次、時間、方向與上下車站 |
 | 🧾 免稅 | 是否達 ¥5,000 門檻、可省多少 |
 | 🤖 雙模型 | Gemini（預設 `gemini-3.5-flash-lite`）⇄ Cloudflare Workers AI，出錯自動切換 |
 | ⚙️ 管理員 | 切換模型、設定「每則都回／只回 @AI」、旅伴名單、清除聊天 |
@@ -74,6 +74,13 @@ npm run deploy
 ```
 
 資料（聊天、記憶、帳目）存在 Durable Object，重新部署不會消失。
+
+## 測試
+
+```bash
+npm test               # 用實際查到的東京路線資料測轉乘精簡邏輯
+npm run test:transit   # 在自己電腦實際查幾條東京路線（需要 Node.js 22.18 以上）
+```
 
 ## 本機開發
 

@@ -1,6 +1,7 @@
 import { sign } from "./auth";
 import type { Env, ToolDecl } from "./types";
 import { TRIP } from "./trip-data";
+import { jstToUtcIso, parseLatLon, transitGeocode, transitPlan, TRANSITOUS_ATTRIBUTION, type LatLon, type TransitOption } from "./transit";
 
 /** 工具可以用到的聊天室功能（由 TripRoom 實作） */
 export interface RoomApi {
@@ -39,6 +40,8 @@ export interface RoomApi {
   documentFolder(name: string, author: string): number | null;
   cacheGet(key: string, maxAgeMs: number): string | null;
   cacheSet(key: string, value: string): void;
+  /** 設定裡的「精確轉乘查詢（Transitous）」有沒有打開 */
+  transitEnabled(): boolean;
 }
 
 export interface ExpenseBrief {
@@ -166,6 +169,35 @@ function distanceM(lat1: number, lon1: number, lat2: number, lon2: number): numb
 function mapsLink(q: string | { lat: number; lon: number }): string {
   const query = typeof q === "string" ? q : `${q.lat},${q.lon}`;
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+}
+
+// ---------------- 精確轉乘（Transitous） ----------------
+
+/** 地點文字 → 座標：座標字串直接用、民宿用房東給的座標、其他用 Transitous 查（快取一天） */
+async function transitPoint(room: RoomApi, place: string): Promise<LatLon | null> {
+  const ll = parseLatLon(place);
+  if (ll) return ll;
+  if (place === HOME_ADDRESS) return { lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon, name: "民宿" };
+  const key = `tgeo:${place}`;
+  const cached = room.cacheGet(key, 86400_000);
+  if (cached) return JSON.parse(cached);
+  const hit = await transitGeocode(place, { lat: TRIP.accommodation.lat, lon: TRIP.accommodation.lon });
+  if (hit) room.cacheSet(key, JSON.stringify(hit));
+  return hit;
+}
+
+/** 查轉乘方案；同樣的起訖點與時間 10 分鐘內用快取，不重複打 Transitous */
+async function transitRoute(room: RoomApi, origin: string, destination: string, departAt?: string, arriveBy = false): Promise<TransitOption[]> {
+  const [from, to] = await Promise.all([transitPoint(room, origin), transitPoint(room, destination)]);
+  if (!from || !to) throw new Error(`找不到${!from ? `「${origin}」` : `「${destination}」`}的位置`);
+  const time = departAt ? jstToUtcIso(departAt) : null;
+  const bucket = time ?? `now-${Math.floor(Date.now() / 600_000)}`;
+  const key = `tplan:${from.lat.toFixed(4)},${from.lon.toFixed(4)}>${to.lat.toFixed(4)},${to.lon.toFixed(4)}|${bucket}|${arriveBy ? 1 : 0}`;
+  const cached = room.cacheGet(key, 600_000);
+  if (cached) return JSON.parse(cached);
+  const plan = await transitPlan(from, to, { time: time ?? undefined, arriveBy });
+  room.cacheSet(key, JSON.stringify(plan));
+  return plan;
 }
 
 // ---------------- 匯率 ----------------
@@ -1103,13 +1135,17 @@ export const TOOLS: Tool[] = [
     label: "🚃 規劃路線",
     decl: {
       name: "plan_route",
-      description: "產生 Google Maps 導航連結（大眾運輸/步行/開車）。詳細轉乘與票價請搭配 web_search 查詢。起點留空=發問者目前位置或住宿。要回民宿 destination 填「民宿」（系統會換成正確地址）。",
+      description:
+        "產生 Google Maps 導航連結（大眾運輸/步行/開車）。精確轉乘查詢開啟時，大眾運輸還會回傳 transit：實際班次的轉乘方案（東京時間、路線、方向、上下車站）。" +
+        "詳細票價請搭配 web_search 查詢。起點留空=發問者目前位置或住宿。要回民宿 destination 填「民宿」（系統會換成正確地址）。",
       parameters: {
         type: "object",
         properties: {
           origin: { type: "string", description: "照成員訊息裡的寫法直接複製（例如「新宿站」），不要自己翻成日文" },
           destination: { type: "string", description: "照成員訊息裡的寫法直接複製（例如「池袋站」），不要自己翻成日文" },
           mode: { type: "string", enum: ["transit", "walking", "driving"] },
+          depart_at: { type: "string", description: "出發時間（東京時間 YYYY-MM-DDTHH:MM），成員有說幾點出發／幾點要到才填；沒說就留空＝現在" },
+          arrive_by: { type: "boolean", description: "true＝depart_at 是「要在這個時間前抵達」" },
         },
         required: ["destination"],
       },
@@ -1128,7 +1164,22 @@ export const TOOLS: Tool[] = [
       const destination = homeOr(String(args.destination));
       u.searchParams.set("destination", destination);
       u.searchParams.set("travelmode", mode);
-      return { origin, destination, mode, google_maps: u.toString() };
+      const base = { origin, destination, mode, google_maps: u.toString() };
+      if (mode !== "transit" || !room.transitEnabled()) return base;
+      try {
+        const transit = await transitRoute(room, origin, destination, args.depart_at, args.arrive_by === true);
+        if (!transit.length) return { ...base, transit_note: "精確轉乘查詢找不到這段路線，請照你知道的回答並附 Google 地圖連結" };
+        return {
+          ...base,
+          transit,
+          transit_source: TRANSITOUS_ATTRIBUTION,
+          how_to_answer:
+            "照 transit 的方案回答（時間都是東京時間，是實際班次）：列 1–2 個方案，逐段寫「幾點在哪站搭哪條線（往哪個方向），坐幾站到哪站」、在哪轉乘、幾點到。" +
+            "有 note 要提醒。不要自己改時間或路線。最後附 google_maps 連結提醒即時狀況以 Google 地圖為準，回答最後一行原樣寫上 transit_source。",
+        };
+      } catch (e: any) {
+        return { ...base, transit_note: `精確轉乘查詢暫時無法使用（${String(e?.message ?? e).slice(0, 80)}），請照你知道的回答並附 Google 地圖連結` };
+      }
     },
   },
   {

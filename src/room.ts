@@ -494,6 +494,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
       autoBrief: this.setting("auto_brief", "1") === "1", // 每天 07:00 早報
       autoDiary: this.setting("auto_diary", "1") === "1", // 每天 22:00 旅遊日記
       autoAlerts: this.setting("auto_alerts", "1") === "1", // 地震、颱風、強風豪雨通知
+      transit: this.setting("transit", "0") === "1", // 精確轉乘查詢（Transitous），預設關閉
       share: this.setting("share_token") ? `/share/${this.setting("share_token")}` : null, // 日記分享連結
     };
   }
@@ -754,7 +755,7 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
           this.setSetting("travelers", msg.travelers.slice(0, 200));
           this.broadcastState();
         }
-        for (const [k, key] of [["autoBrief", "auto_brief"], ["autoDiary", "auto_diary"], ["autoAlerts", "auto_alerts"]] as const) {
+        for (const [k, key] of [["autoBrief", "auto_brief"], ["autoDiary", "auto_diary"], ["autoAlerts", "auto_alerts"], ["transit", "transit"]] as const) {
           if (typeof msg[k] === "boolean") this.setSetting(key, msg[k] ? "1" : "0");
         }
         this.broadcast({ type: "settings", settings: this.settings() });
@@ -1326,6 +1327,10 @@ export class TripRoom extends DurableObject<Env> implements RoomApi {
         jpy: r.amount_jpy, twd: r.amount_twd, payer: r.payer, split_among: JSON.parse((r.split_among as string) || "[]"), category: r.category,
       })),
     };
+  }
+
+  transitEnabled(): boolean {
+    return this.setting("transit", "0") === "1";
   }
 
   cacheGet(key: string, maxAgeMs: number): string | null {
@@ -2247,7 +2252,7 @@ ${summary ? `\n# 更早的對話摘要\n${summary}\n` : ""}${recall ? `\n# 以�
 - 工具回傳 error 代表失敗：要如實告訴成員沒有完成，不可以說已完成。記帳前確認分攤對象是否符合成員說的人數。
 - 記帳（add_expense）、修改行程（update_itinerary）、刪除帳目或提醒：工具只會在你的回答下方產生確認卡片，要等成員按「確認」才會寫入。呼叫後用一兩句話說明你看到的內容（照片上的店名、日期、金額…）和準備寫入的內容，請成員核對卡片；絕對不要說「已記好／已更新／已刪除」。資料有疑問（日期不在旅遊期間、金額或幣別看不清楚、不確定誰付的）就先直接問成員，等成員回答再呼叫工具。成員要修改還沒確認的卡片，就重新呼叫同一個工具並在 replaces 填舊卡片編號。卡片只能靠呼叫工具產生，不要在回答裡自己寫卡片內容。還沒確認的卡片不用刪，請成員直接按卡片上的「取消」。
 - 提到日圓價格時附上約合台幣（用 convert_currency）。
-- 問路、問地鐵電車怎麼搭：照你知道的回答坐哪條線、往哪個方向、在哪轉乘（不要寫站數），最後用 plan_route 附 Google 地圖連結，提醒即時班次和月台以 Google 地圖為準；必要時用 web_search 補充轉乘與票價。成員問坐幾站、或要你查證／確認路線時，才用 check_route_map（官方路線圖優先），照它回傳的 routes 回答、寫出依據的路線圖（圖會附在回答下方）；呼叫時把你認為的搭法填在 legs 讓它核對；它沒找到可靠的圖，就說沒查到可以查證的路線圖，請大家看 Google 地圖。沒有用 check_route_map 時，不要說「依據路線圖」或「路線圖附在下方」。成員自己傳路線圖、時刻表或車站照片來問時，照照片上清楚看得到的內容回答。
+${this.transitEnabled() ? "- 問路、問地鐵電車怎麼搭：先用 plan_route（mode=transit）查精確轉乘，照它回傳的 transit 方案回答（實際班次的東京時間、路線、方向、坐幾站、上下車站，不要自己改）；transit 沒有結果時才照你知道的回答坐哪條線、往哪個方向、在哪轉乘。最後附 Google 地圖連結，提醒即時狀況以 Google 地圖為準。" : "- 問路、問地鐵電車怎麼搭：照你知道的回答坐哪條線、往哪個方向、在哪轉乘（不要寫站數），最後用 plan_route 附 Google 地圖連結，提醒即時班次和月台以 Google 地圖為準；必要時用 web_search 補充轉乘與票價。成員問坐幾站、或要你查證／確認路線時，才用 check_route_map（官方路線圖優先），照它回傳的 routes 回答、寫出依據的路線圖（圖會附在回答下方）；呼叫時把你認為的搭法填在 legs 讓它核對；它沒找到可靠的圖，就說沒查到可以查證的路線圖，請大家看 Google 地圖。沒有用 check_route_map 時，不要說「依據路線圖」或「路線圖附在下方」。成員自己傳路線圖、時刻表或車站照片來問時，照照片上清楚看得到的內容回答。"}
 - 用 web_search 查交通、票價、營業時間、規定時，優先採用官方網站（營運公司、政府、景點官網）的資料，找不到官方的才用其他網站，並註明來源。
 - 民宿的位置一律用房東給的地圖連結 ${a.googleMap}；要帶路回民宿就用 plan_route，destination 填「民宿」。不要用房源名稱「${a.name}」或自己打的地址搜尋（常會跑到錯的地方）。
 - 地圖連結：工具回傳的連結可以直接用（find_nearby 給的是那家店的座標，照抄，不要改成店名搜尋，連鎖店用店名會跑到別家分店）；其他地點一律寫成 [📍地點名稱](map)，系統會自動換成 Google 地圖搜尋連結（地點名稱用日文或英文的正式名稱，連鎖店要加分店名，例如 [📍ドン・キホーテ 池袋駅西口店](map)）。不要自己寫 Google 地圖網址，絕對不要編 maps.app.goo.gl 短網址，也不要用自己記得的地址或座標當連結（記錯一個字就會指到別的地方）。

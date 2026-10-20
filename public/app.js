@@ -1427,6 +1427,8 @@ function renderPanelInner() {
           <label class="row between small"><span>☀️ 每天 07:00 早報</span><input type="checkbox" data-auto="autoBrief" ${s.autoBrief ? "checked" : ""} /></label>
           <label class="row between small"><span>📔 每天 22:00 旅遊日記</span><input type="checkbox" data-auto="autoDiary" ${s.autoDiary ? "checked" : ""} /></label>
           <label class="row between small"><span>🆘 地震、颱風、強風豪雨通知</span><input type="checkbox" data-auto="autoAlerts" ${s.autoAlerts ? "checked" : ""} /></label>
+          <div class="small muted" style="margin-top:10px">實驗功能</div>
+          <label class="row between small"><span>🚃 精確轉乘查詢（實際班次、時間、月台方向）<br><span class="muted">資料來源 <a href="https://transitous.org/sources/" target="_blank" rel="noopener">Transitous</a>，東京已測試</span></span><input type="checkbox" data-auto="transit" ${s.transit ? "checked" : ""} /></label>
           <div class="row" style="gap:6px;margin-top:6px">
             <button class="btn small" id="brief-now">現在發一次早報</button>
             <button class="btn small" id="diary-now">現在寫今天的日記</button>

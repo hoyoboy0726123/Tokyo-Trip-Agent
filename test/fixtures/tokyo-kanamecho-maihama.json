@@ -1,0 +1,316 @@
+{
+ "itineraries": [
+  {
+   "startTime": "2026-10-20T08:16:00Z",
+   "endTime": "2026-10-20T09:29:00Z",
+   "transfers": 2,
+   "legs": [
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "START"
+     },
+     "to": {
+      "name": "椎名町 Shiinamachi"
+     },
+     "startTime": "2026-10-20T08:16:00Z",
+     "endTime": "2026-10-20T08:29:00Z",
+     "distance": 886
+    },
+    {
+     "mode": "REGIONAL_RAIL",
+     "from": {
+      "name": "椎名町 Shiinamachi"
+     },
+     "to": {
+      "name": "池袋 Ikebukuro"
+     },
+     "startTime": "2026-10-20T08:29:00Z",
+     "endTime": "2026-10-20T08:32:00Z",
+     "routeShortName": "SI",
+     "routeLongName": "西武池袋線 Seibu Ikebukuro Line",
+     "agencyName": "西武鉄道 Seibu Railway",
+     "headsign": "(各駅停車 Local) 池袋 Ikebukuro",
+     "realTime": true,
+     "intermediateStops": []
+    },
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "池袋 Ikebukuro"
+     },
+     "to": {
+      "name": "池袋"
+     },
+     "startTime": "2026-10-20T08:32:00Z",
+     "endTime": "2026-10-20T08:34:00Z",
+     "distance": 300
+    },
+    {
+     "mode": "REGIONAL_RAIL",
+     "from": {
+      "name": "池袋"
+     },
+     "to": {
+      "name": "東京"
+     },
+     "startTime": "2026-10-20T08:35:00Z",
+     "endTime": "2026-10-20T08:51:00Z",
+     "routeShortName": "20217991",
+     "routeLongName": "",
+     "agencyName": "東京メトロ",
+     "headsign": "荻窪",
+     "realTime": false,
+     "intermediateStops": [
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {}
+     ]
+    },
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "東京"
+     },
+     "to": {
+      "name": "東京"
+     },
+     "startTime": "2026-10-20T08:51:00Z",
+     "endTime": "2026-10-20T08:53:00Z",
+     "distance": 0
+    },
+    {
+     "mode": "REGIONAL_RAIL",
+     "from": {
+      "name": "東京"
+     },
+     "to": {
+      "name": "舞浜"
+     },
+     "startTime": "2026-10-20T08:53:00Z",
+     "endTime": "2026-10-20T09:14:00Z",
+     "routeShortName": "7937121",
+     "routeLongName": "",
+     "agencyName": "JR",
+     "headsign": "上総一ノ宮",
+     "realTime": false,
+     "intermediateStops": [
+      {},
+      {},
+      {},
+      {},
+      {}
+     ]
+    },
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "舞浜"
+     },
+     "to": {
+      "name": "END"
+     },
+     "startTime": "2026-10-20T09:14:00Z",
+     "endTime": "2026-10-20T09:29:00Z",
+     "distance": 1048
+    }
+   ]
+  },
+  {
+   "startTime": "2026-10-20T08:16:00Z",
+   "endTime": "2026-10-20T09:25:00Z",
+   "transfers": 4,
+   "legs": [
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "START"
+     },
+     "to": {
+      "name": "椎名町 Shiinamachi"
+     },
+     "startTime": "2026-10-20T08:16:00Z",
+     "endTime": "2026-10-20T08:29:00Z",
+     "distance": 886
+    },
+    {
+     "mode": "REGIONAL_RAIL",
+     "from": {
+      "name": "椎名町 Shiinamachi"
+     },
+     "to": {
+      "name": "池袋 Ikebukuro"
+     },
+     "startTime": "2026-10-20T08:29:00Z",
+     "endTime": "2026-10-20T08:32:00Z",
+     "routeLongName": "西武池袋線 Seibu Ikebukuro Line",
+     "agencyName": "西武鉄道 Seibu Railway",
+     "intermediateStops": []
+    },
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "舞浜 Maihama",
+      "cancelled": true
+     },
+     "to": {
+      "name": "リゾートゲートウェイ・ステーション",
+      "cancelled": true
+     },
+     "startTime": "2026-10-20T09:14:00Z",
+     "endTime": "2026-10-20T09:16:00Z",
+     "cancelled": true
+    },
+    {
+     "mode": "REGIONAL_RAIL",
+     "from": {
+      "name": "リゾートゲートウェイ・ステーション"
+     },
+     "to": {
+      "name": "東京ディズニーランド・ステーション"
+     },
+     "startTime": "2026-10-20T09:16:00Z",
+     "endTime": "2026-10-20T09:18:00Z",
+     "routeShortName": "5401600",
+     "agencyName": "ディズニーリゾートライン",
+     "headsign": "リゾートゲートウェイ・ステーション",
+     "intermediateStops": []
+    },
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "東京ディズニーランド・ステーション"
+     },
+     "to": {
+      "name": "END"
+     },
+     "startTime": "2026-10-20T09:18:00Z",
+     "endTime": "2026-10-20T09:25:00Z",
+     "distance": 467
+    }
+   ]
+  },
+  {
+   "startTime": "2026-10-20T08:22:00Z",
+   "endTime": "2026-10-20T09:31:00Z",
+   "transfers": 2,
+   "legs": [
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "START"
+     },
+     "to": {
+      "name": "椎名町 Shiinamachi"
+     },
+     "startTime": "2026-10-20T08:22:00Z",
+     "endTime": "2026-10-20T08:35:00Z",
+     "distance": 886
+    },
+    {
+     "mode": "REGIONAL_RAIL",
+     "from": {
+      "name": "椎名町 Shiinamachi"
+     },
+     "to": {
+      "name": "池袋 Ikebukuro"
+     },
+     "startTime": "2026-10-20T08:35:00Z",
+     "endTime": "2026-10-20T08:38:00Z",
+     "routeShortName": "SI",
+     "routeLongName": "西武池袋線 Seibu Ikebukuro Line",
+     "agencyName": "西武鉄道 Seibu Railway",
+     "headsign": "(各駅停車 Local) 池袋 Ikebukuro",
+     "realTime": true,
+     "intermediateStops": []
+    },
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "池袋 Ikebukuro"
+     },
+     "to": {
+      "name": "池袋 Ikebukuro"
+     },
+     "startTime": "2026-10-20T08:38:00Z",
+     "endTime": "2026-10-20T08:40:00Z",
+     "distance": 504
+    },
+    {
+     "mode": "SUBWAY",
+     "from": {
+      "name": "池袋 Ikebukuro"
+     },
+     "to": {
+      "name": "東京 Tōkyō"
+     },
+     "startTime": "2026-10-20T08:40:00Z",
+     "endTime": "2026-10-20T08:57:00Z",
+     "routeShortName": "M",
+     "routeLongName": "東京メトロ丸ノ内線 Tokyo Metro Marunouchi Line",
+     "agencyName": "東京メトロ Tokyo Metro",
+     "headsign": "(普通 Local) 荻窪 Ogikubo",
+     "intermediateStops": [
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {}
+     ]
+    },
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "東京 Tōkyō"
+     },
+     "to": {
+      "name": "東京 Tōkyō"
+     },
+     "startTime": "2026-10-20T08:57:00Z",
+     "endTime": "2026-10-20T09:02:00Z",
+     "distance": 776
+    },
+    {
+     "mode": "REGIONAL_RAIL",
+     "from": {
+      "name": "東京 Tōkyō"
+     },
+     "to": {
+      "name": "舞浜 Maihama"
+     },
+     "startTime": "2026-10-20T09:02:00Z",
+     "endTime": "2026-10-20T09:18:00Z",
+     "routeShortName": "JE",
+     "routeLongName": "JR京葉線 JR Keiyō Line",
+     "agencyName": "JR東日本 JR East",
+     "headsign": "(普通 Local) 蘇我 Soga",
+     "intermediateStops": [
+      {},
+      {},
+      {},
+      {},
+      {}
+     ]
+    },
+    {
+     "mode": "WALK",
+     "from": {
+      "name": "舞浜 Maihama"
+     },
+     "to": {
+      "name": "END"
+     },
+     "startTime": "2026-10-20T09:18:00Z",
+     "endTime": "2026-10-20T09:31:00Z",
+     "distance": 910
+    }
+   ]
+  }
+ ]
+}

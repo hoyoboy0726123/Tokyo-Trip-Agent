@@ -6,7 +6,9 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
-    "setup": "node scripts/setup.mjs"
+    "setup": "node scripts/setup.mjs",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "test:transit": "node scripts/test-transit.ts"
   },
   "author": "",
   "license": "ISC",
